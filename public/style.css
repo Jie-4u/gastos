@@ -1,0 +1,30 @@
+:root{--g:#1f8f63;--bg:#f5f9fc;--bd:#dfe6ec;--tx:#1b2430;--mu:#667085}
+*{box-sizing:border-box}
+body{margin:0;background:#e6e8eb;font-family:Inter,system-ui,Segoe UI,sans-serif;color:var(--tx);font-size:14px}
+#app{max-width:430px;min-height:100vh;margin:0 auto;background:var(--bg);display:flex;flex-direction:column;position:relative}
+header{background:#fff;padding:18px 16px;display:flex;align-items:center;gap:10px}
+header h2{margin:0;font-size:18px;flex:1}
+.back,.ico{background:none;border:0;font-size:22px;cursor:pointer;padding:0 6px}
+main{flex:1;padding:18px 16px 90px;display:flex;flex-direction:column;gap:12px}
+main.bare{justify-content:center}
+.logo{color:var(--g);text-align:center;font-size:28px;margin:0 0 14px}
+input,select{width:100%;padding:12px;border:1px solid var(--bd);border-radius:10px;font:inherit;background:#fff}
+form{display:flex;flex-direction:column;gap:12px}
+label{font-size:12px;font-weight:600;margin-bottom:-6px}
+.btn{background:var(--g);color:#fff;border:0;border-radius:10px;padding:13px;font:600 14px inherit;cursor:pointer;width:100%}
+.btn.alt{background:#fff;color:var(--tx);border:1px solid var(--bd)}
+.btn.sm{width:auto;padding:6px 12px;font-size:12px}
+.card{background:#fff;border:1px solid var(--bd);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:4px}
+.card b{font-size:15px}.sm,.mu{color:var(--mu);font-size:12.5px;line-height:1.6}
+.row{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.lnk{color:var(--g);cursor:pointer;font-size:13px}
+.chips{display:flex;flex-wrap:wrap;gap:8px 16px}.chips a{color:var(--g);cursor:pointer}
+.fam{font-size:17px;color:var(--mu);margin:0}
+.bar{height:7px;background:#e4ece8;border-radius:5px;overflow:hidden;margin-top:4px}
+.bar i{display:block;height:100%;background:var(--g)}
+.inc{color:var(--g)}.exp{color:#c0392b}
+.price{color:var(--g);font-weight:700;font-size:16px}
+nav{position:fixed;bottom:0;width:100%;max-width:430px;background:#fff;display:flex;border-top:1px solid var(--bd)}
+nav a{flex:1;text-align:center;padding:14px 0;font-size:11px;color:var(--mu);cursor:pointer}
+nav a.on{color:var(--g);font-weight:700}
+#toast{position:fixed;top:14px;left:50%;transform:translateX(-50%);background:#222;color:#fff;padding:10px 16px;border-radius:8px;display:none;z-index:9}
