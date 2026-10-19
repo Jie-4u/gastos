@@ -1,5 +1,8 @@
 venv/
+.venv/
 __pycache__/
+*.py[cod]
 instance/
 .env
 .vercel/
+gastos.db
