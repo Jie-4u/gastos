@@ -134,7 +134,7 @@ V.welcome = async () => ({ bare: 1, html: `<section class="welcome"><div class="
 
 V.signup = async () => {
   const inv = S.inviteInfo;
-  return auth(inv ? `Join ${esc(inv.family)}` : 'Create your account', inv ? `Create an account with <b>${esc(inv.email)}</b> to accept your invitation.` : 'It takes less than a minute. No credit card needed.',
+  return auth(inv ? `Join ${esc(inv.family)}` : 'Create your account', inv ? `Create an account with <b>${esc(inv.email)}</b> to accept your invitation.` : 'No credit card needed for Free plans.',
     `<form data-f="signup" class="stack">${inv ? `<input type="hidden" name="invite_token" value="${esc(S.invite)}">` : ''}
     ${field('Full name', '<input name="name" autocomplete="name" placeholder="Juan dela Cruz" maxlength="120" required>')}
     ${field('Email', `<input name="email" type="email" autocomplete="email" placeholder="you@example.com" ${inv ? `value="${esc(inv.email)}" readonly` : ''} required>`)}
