@@ -6,6 +6,7 @@ from datetime import date
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlsplit
 
+os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ["SECRET_KEY"] = "gastos-test-secret"
 os.environ["APP_BASE_URL"] = "https://gastos.example.test"
@@ -388,6 +389,80 @@ class CriticalFlowTests(unittest.TestCase):
         bills = {row["name"]: row for row in self.client.get("/api/bills", headers=self.owner_headers).json}
         self.assertEqual(bills["Today bill"]["due_status"], "due_today")
         self.assertEqual(bills["Old bill"]["due_status"], "overdue")
+
+
+class RuntimeConfigTests(unittest.TestCase):
+    base_env = {
+        "APP_ENV": "production",
+        "SECRET_KEY": "production-secret-key-" + "x" * 32,
+        "DATABASE_URL": "postgresql://user:password@db.example.test/gastos",
+        "APP_BASE_URL": "https://gastos.example.test",
+    }
+
+    def config(self, **overrides):
+        env = dict(self.base_env)
+        for key, value in overrides.items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
+        with patch.dict(os.environ, env, clear=True):
+            return gastos.runtime_config()
+
+    def test_runtime_config_requires_explicit_environment(self):
+        with self.assertRaisesRegex(RuntimeError, "APP_ENV must be explicitly set"):
+            self.config(APP_ENV=None)
+        with self.assertRaisesRegex(RuntimeError, "APP_ENV must be explicitly set"):
+            self.config(APP_ENV="prod")
+
+    def test_development_generates_ephemeral_secret_when_missing(self):
+        environment, secret, _, generated = self.config(APP_ENV="development", SECRET_KEY=None)
+        self.assertEqual(environment, "development")
+        self.assertTrue(generated)
+        self.assertNotEqual(secret, gastos.LEGACY_INSECURE_SECRET)
+        self.assertGreaterEqual(len(secret), 32)
+
+    def test_production_requires_secret(self):
+        with self.assertRaisesRegex(RuntimeError, "SECRET_KEY must be configured in production"):
+            self.config(SECRET_KEY=None)
+
+    def test_runtime_config_rejects_old_placeholder_secret(self):
+        with self.assertRaisesRegex(RuntimeError, "old development placeholder"):
+            self.config(SECRET_KEY=gastos.LEGACY_INSECURE_SECRET)
+
+    def test_production_requires_long_secret(self):
+        with self.assertRaisesRegex(RuntimeError, "at least 32 characters"):
+            self.config(SECRET_KEY="too-short")
+
+    def test_production_requires_postgres(self):
+        with self.assertRaisesRegex(RuntimeError, "persistent PostgreSQL"):
+            self.config(DATABASE_URL="sqlite:///gastos.db")
+        with self.assertRaisesRegex(RuntimeError, "persistent PostgreSQL"):
+            self.config(DATABASE_URL="mysql://user:password@db.example.test/gastos")
+        with self.assertRaisesRegex(RuntimeError, "DATABASE_URL must be configured"):
+            self.config(DATABASE_URL=None)
+
+    def test_production_requires_https_app_origin(self):
+        with self.assertRaisesRegex(RuntimeError, "must be configured in production"):
+            self.config(APP_BASE_URL=None)
+        with self.assertRaisesRegex(RuntimeError, "public HTTPS origin"):
+            self.config(APP_BASE_URL="http://gastos.example.test")
+        with self.assertRaisesRegex(RuntimeError, "without a path"):
+            self.config(APP_BASE_URL="https://gastos.example.test/app")
+
+    def test_development_can_use_default_sqlite_and_test_can_use_memory(self):
+        environment, _, url, _ = self.config(APP_ENV="development", DATABASE_URL=None)
+        self.assertEqual(environment, "development")
+        self.assertEqual(url, "sqlite:///gastos.db")
+        environment, _, url, _ = self.config(APP_ENV="test", DATABASE_URL="sqlite:///:memory:")
+        self.assertEqual(environment, "test")
+        self.assertEqual(url, "sqlite:///:memory:")
+
+    def test_postgres_url_is_normalized_for_psycopg2(self):
+        environment, _, url, generated = self.config(DATABASE_URL="postgres://user:password@db.example.test/gastos")
+        self.assertEqual(environment, "production")
+        self.assertFalse(generated)
+        self.assertEqual(url, "postgresql+psycopg2://user:password@db.example.test/gastos")
 
 
 if __name__ == "__main__":
