@@ -208,6 +208,26 @@ class CriticalFlowTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/goals", headers=member_headers,
             json={"name": "Emergency fund", "target": 500}).status_code, 403)
 
+    def test_non_owner_cannot_read_invitation_links_or_invitee_emails(self):
+        first = self.client.post("/api/invite", headers=self.owner_headers,
+                                 json={"email": "member@example.com"}).json["invitation"]
+        signup = self.client.post("/api/signup", json={
+            "name": "Member", "email": "member@example.com", "password": "password123",
+            "invite_token": first["link"].split("invite=", 1)[1],
+        })
+        member_headers = {"Authorization": f"Bearer {signup.json['token']}"}
+        self.client.post("/api/invite", headers=self.owner_headers,
+                         json={"email": "pending@example.com"})
+
+        owner_view = self.client.get("/api/me", headers=self.owner_headers).json
+        pending = next(i for i in owner_view["family"]["invites"] if i["email"] == "pending@example.com")
+        self.assertEqual(pending["status"], "pending")
+        self.assertTrue(pending["link"])
+
+        member_view = self.client.get("/api/me", headers=member_headers).json
+        self.assertEqual(member_view["family"]["invites"], [])
+        self.assertNotIn("pending@example.com", str(member_view))
+
     def test_dashboard_budget_progress_and_transaction_crud_are_family_scoped(self):
         created = self.client.post("/api/transactions", headers=self.owner_headers, json={
             "kind": "expense", "amount": 200, "category": "Food", "note": "Groceries",
