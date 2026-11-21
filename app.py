@@ -5,6 +5,7 @@ from email.utils import formataddr
 from functools import wraps
 from flask import Flask, request, jsonify, send_from_directory, Response, g
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.exc import IntegrityError
 from werkzeug.security import generate_password_hash, check_password_hash
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from urllib.parse import urlencode, urlsplit
@@ -97,6 +98,16 @@ reset_ser = URLSafeTimedSerializer(secret, salt="gastos-password-reset-v1")
 LIMIT = {"free": 4, "premium": 10}
 FREE_BUDGETS = 3
 FAMILY_ROLES = ("Parent", "Member")
+SIGNIN_IP_LIMIT = (60, 15 * 60)
+SIGNIN_EMAIL_LIMIT = (5, 15 * 60)
+SIGNUP_IP_LIMIT = (10, 60 * 60)
+RESET_IP_LIMIT = (10, 60 * 60)
+RESET_EMAIL_LIMIT = (5, 15 * 60)
+INVITE_OWNER_LIMIT = (20, 60 * 60)
+INVITE_RECIPIENT_LIMIT = (5, 60 * 60)
+EMAIL_GLOBAL_LIMIT = (100, 60 * 60)
+EMAIL_RECIPIENT_LIMIT = (10, 60 * 60)
+PASSWORD_RESET_MESSAGE = "If an account exists for that email and email delivery is available, a password reset link will arrive shortly."
 
 
 def can_manage_finances(user=None):
@@ -158,6 +169,14 @@ class WebhookEvent(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     provider_event_id = db.Column(db.String(120), unique=True, nullable=False)
     received_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+
+class RateLimit(db.Model):
+    """Short-lived counters keyed by a hashed scope and value."""
+    key = db.Column(db.String(200), primary_key=True)
+    count = db.Column(db.Integer, nullable=False, default=0)
+    window_started = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
 
 
 class Tx(db.Model):
@@ -248,6 +267,59 @@ with app.app_context():
 
 def err(m, c=400):
     return jsonify(error=m), c
+
+
+def rate_limit_key(scope, value):
+    return f"{scope}:{hashlib.sha256(str(value).encode()).hexdigest()}"
+
+
+def client_ip():
+    if os.environ.get("TRUST_PROXY_HEADERS") == "1":
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",", 1)[0].strip() or "unknown"
+    return request.remote_addr or "unknown"
+
+
+def consume_rate_limit(scope, value, limit, window_seconds, retry=True):
+    """Consume one slot for a hashed rate-limit key; return seconds to wait when blocked."""
+    now = datetime.utcnow()
+    key = rate_limit_key(scope, value)
+    RateLimit.query.filter(RateLimit.expires_at <= now).delete(synchronize_session=False)
+    row = RateLimit.query.filter_by(key=key).first()
+    if row is None:
+        row = RateLimit(key=key, count=1, window_started=now,
+                        expires_at=now + timedelta(seconds=window_seconds))
+        db.session.add(row)
+    elif row.count >= limit:
+        retry_after = max(1, math.ceil((row.expires_at - now).total_seconds()))
+        db.session.commit()
+        return retry_after
+    else:
+        row.count += 1
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        if not retry:
+            return window_seconds
+        return consume_rate_limit(scope, value, limit, window_seconds, retry=False)
+    return None
+
+
+def rate_limited(retry_after):
+    response = jsonify(error="Too many attempts. Please try again later.")
+    response.status_code = 429
+    response.headers["Retry-After"] = str(max(1, int(retry_after)))
+    return response
+
+
+def email_quota_available(recipient):
+    if consume_rate_limit("email-global", "all", *EMAIL_GLOBAL_LIMIT):
+        return False
+    if consume_rate_limit("email-recipient", recipient.lower(), *EMAIL_RECIPIENT_LIMIT):
+        return False
+    return True
 
 
 def body():
@@ -369,6 +441,9 @@ def send_invitation_email(inv, link):
                 os.environ.get("SMTP_PASSWORD"), os.environ.get("SMTP_FROM"))
     if not all(settings):
         return "manual_share"
+    if not email_quota_available(inv.email):
+        app.logger.warning("Invitation email throttled by rate limit")
+        return "failed"
     family = db.session.get(Family, inv.family_id)
     inviter = db.session.get(User, inv.inviter_id) if inv.inviter_id else None
     expires = inv.expires_at.strftime("%B %d, %Y %H:%M UTC") if inv.expires_at else "in 7 days"
@@ -429,6 +504,9 @@ def send_password_reset_email(user, link):
                 os.environ.get("SMTP_PASSWORD"), os.environ.get("SMTP_FROM"))
     if not all(settings):
         return "manual_share"
+    if not email_quota_available(user.email):
+        app.logger.warning("Password reset email throttled by rate limit")
+        return "failed"
     message = EmailMessage()
     message["Subject"] = "Reset your Gastos password"
     sender = os.environ["SMTP_FROM"]
@@ -508,6 +586,11 @@ def password_reset_request():
     d = body()
     email = d.get("email") if isinstance(d.get("email"), str) else ""
     email = email.strip().lower()
+    reset_block = consume_rate_limit("reset-ip", client_ip(), *RESET_IP_LIMIT)
+    if not reset_block:
+        reset_block = consume_rate_limit("reset-email", email or "missing", *RESET_EMAIL_LIMIT)
+    if reset_block:
+        return jsonify(message=PASSWORD_RESET_MESSAGE)
     user = User.query.filter_by(email=email).first() if re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) else None
     now = datetime.utcnow()
     if user and (not user.reset_requested_at or user.reset_requested_at < now - timedelta(minutes=1)):
@@ -524,7 +607,7 @@ def password_reset_request():
         except Exception:
             db.session.rollback()
             app.logger.exception("Password reset request could not be completed")
-    return jsonify(message="If an account exists for that email and email delivery is available, a password reset link will arrive shortly.")
+    return jsonify(message=PASSWORD_RESET_MESSAGE)
 
 
 @app.post("/api/password-reset/complete")
@@ -556,6 +639,9 @@ def password_reset_complete():
 
 @app.post("/api/signup")
 def signup():
+    rate_block = consume_rate_limit("signup-ip", client_ip(), *SIGNUP_IP_LIMIT)
+    if rate_block:
+        return rate_limited(rate_block)
     d = body()
     name = d.get("name") if isinstance(d.get("name"), str) else ""
     email = d.get("email") if isinstance(d.get("email"), str) else ""
@@ -598,6 +684,11 @@ def signin():
     d = body()
     email = d.get("email") if isinstance(d.get("email"), str) else ""
     password = d.get("password") if isinstance(d.get("password"), str) else ""
+    rate_block = consume_rate_limit("signin-ip", client_ip(), *SIGNIN_IP_LIMIT)
+    if not rate_block:
+        rate_block = consume_rate_limit("signin-email", email.strip().lower(), *SIGNIN_EMAIL_LIMIT)
+    if rate_block:
+        return rate_limited(rate_block)
     u = User.query.filter_by(email=email.strip().lower()).first()
     if not u or not check_password_hash(u.pw, password):
         return err("Wrong email or password", 401)
@@ -755,6 +846,11 @@ def invite():
     role = data.get("role", "Member")
     if role not in FAMILY_ROLES:
         return err("Choose Parent or Member")
+    rate_block = consume_rate_limit("invite-owner", g.u.id, *INVITE_OWNER_LIMIT)
+    if not rate_block:
+        rate_block = consume_rate_limit("invite-recipient", email, *INVITE_RECIPIENT_LIMIT)
+    if rate_block:
+        return rate_limited(rate_block)
     now = datetime.utcnow()
     used = User.query.filter_by(family_id=g.f.id).count() + Invite.query.filter_by(
         family_id=g.f.id, accepted_at=None, revoked_at=None
@@ -846,6 +942,11 @@ def resend_invitation(i):
     if not g.u.is_owner:
         return err("Only the family owner can resend invitations", 403)
     inv = Invite.query.filter_by(id=i, family_id=g.f.id, accepted_at=None, revoked_at=None).first_or_404()
+    rate_block = consume_rate_limit("invite-owner", g.u.id, *INVITE_OWNER_LIMIT)
+    if not rate_block:
+        rate_block = consume_rate_limit("invite-recipient", inv.email, *INVITE_RECIPIENT_LIMIT)
+    if rate_block:
+        return rate_limited(rate_block)
     if inv.delivery_attempted_at and inv.delivery_attempted_at > datetime.utcnow() - timedelta(minutes=1):
         return err("This invitation was just emailed. Wait a minute before resending.", 429)
     inv.expires_at = datetime.utcnow() + timedelta(days=7)
