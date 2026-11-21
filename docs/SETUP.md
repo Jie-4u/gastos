@@ -71,6 +71,12 @@ Other suitable options are Railway, Fly.io, or a VPS. Each needs a persistent Po
 
 The repository currently applies additive schema changes at app startup. The included Gunicorn command uses one worker because startup schema changes are not safe to race across multiple worker processes. Before scaling to multiple instances or running broader production workloads, replace startup DDL with versioned migrations run once before workers start.
 
+## Request limits
+
+Sign-in, signup, password-reset requests, invitation sends, and outbound email are rate limited. Counters are stored in the database and keyed by hashed IP, account, or email values, so they survive application restarts. Sign-in and password reset enforce both per-IP and per-account limits; invitations enforce per-owner and per-recipient limits; outbound email has global and per-recipient limits. Password-reset responses stay generic when a limit is reached.
+
+Set `TRUST_PROXY_HEADERS=1` only when the app is behind a trusted proxy that sets `X-Forwarded-For` (the Render Blueprint and Procfile do this). Do not enable it on a directly exposed server, because clients could spoof the header and bypass IP limits.
+
 ## Premium payments: account setup still required
 
 You can start with PayMongo test mode while Gastos is still a prototype; test keys are available before full live business verification. For live service, PayMongo's current Subscriptions API supports recurring Visa/Mastercard and Maya payments. Your account needs the underlying method activated, and PayMongo must separately enable Subscriptions. Card subscriptions also require Card Vaulting. Account activation and method eligibility depend on identity/business verification and the payment method requested. See [PayMongo account creation](https://docs.paymongo.com/docs/get-started-create-your-account), [Subscriptions](https://docs.paymongo.com/docs/payment-acceptance-subscriptions), [account capabilities](https://docs.paymongo.com/docs/account-settings-account-capabilities), and [Card Vaulting](https://docs.paymongo.com/docs/payment-acceptance-card-vaulting).
