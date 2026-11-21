@@ -5,12 +5,15 @@
 1. Create and activate a Python virtual environment.
 2. Install dependencies with `pip install -r requirements.txt`.
 3. Copy `.env.example` to `.env`.
-4. Generate a unique `SECRET_KEY` (PowerShell: `python -c "import secrets; print(secrets.token_urlsafe(48))"`) and put it in `.env`.
-5. Keep `APP_BASE_URL=http://127.0.0.1:5000` for local-only use. For remote invitations, use the permanent HTTPS URL of the deployed app.
-6. Run `python app.py` and open `http://127.0.0.1:5000`.
-7. Run regression tests with `python -m unittest discover -s tests`.
+4. Set `APP_ENV=development` in `.env`. Startup now refuses to run without an explicit environment.
+5. Generate a unique `SECRET_KEY` (PowerShell: `python -c "import secrets; print(secrets.token_urlsafe(48))"`) and put it in `.env`. If you leave it blank in development, Gastos generates an ephemeral key and resets sessions on restart.
+6. Keep `APP_BASE_URL=http://127.0.0.1:5000` for local-only use. For remote invitations, use the permanent HTTPS URL of the deployed app.
+7. Run `python app.py` and open `http://127.0.0.1:5000`.
+8. Run regression tests with `python -m unittest discover -s tests`; the test process sets its own `APP_ENV=test`.
 
 The `.env` file is ignored by Git. Do not commit real keys or passwords. Existing local development databases are under `instance/` and are ignored.
+
+Startup fails closed: a missing or invalid `APP_ENV`, the old development placeholder key, a missing production `SECRET_KEY`, or unsafe production settings stop the process with a clear error. This is intentional. In development/test, a blank `SECRET_KEY` generates an ephemeral key instead. After changing `SECRET_KEY`, all existing sessions, invitation links, and password-reset links become invalid.
 
 ## Invitation email
 
@@ -58,11 +61,12 @@ Other suitable options are Railway, Fly.io, or a VPS. Each needs a persistent Po
 
 ## Production settings
 
-- Set `SECRET_KEY` to a unique random secret and keep it in the host's secret manager.
-- Set `APP_ENV=production`; startup refuses to use the development fallback key in this mode.
+- Set `APP_ENV=production`; startup now requires an explicit `development`, `test`, or `production` value. Existing deployments that relied on the old development fallback will fail to start until this and the settings below are configured.
+- Set `SECRET_KEY` to a unique random secret of at least 32 characters and keep it in the host's secret manager. The old development placeholder is rejected in every environment.
 - Set `APP_BASE_URL` to a custom canonical HTTPS origin if you use a domain; otherwise Render's HTTPS URL is used. Production startup rejects a missing/non-HTTPS URL, URL path, or SQLite database. Invitation links are not built from request headers.
-- Set `DATABASE_URL` to the production PostgreSQL connection string. Back up existing data before deployment. The web service's health check at `/health` checks database connectivity.
+- Set `DATABASE_URL` to the production PostgreSQL connection string; production startup requires it. Back up existing data before deployment. The web service's health check at `/health` checks database connectivity.
 - Configure SMTP values if invitations should be delivered by email.
+- The included Procfile sets `APP_ENV=production`; hosts using it must also provide `SECRET_KEY` and `DATABASE_URL` or the process will refuse to start.
 - Serve the app behind HTTPS and use a production WSGI server. Direct `python app.py` startup enables debug mode only when `FLASK_DEBUG=1`.
 
 The repository currently applies additive schema changes at app startup. The included Gunicorn command uses one worker because startup schema changes are not safe to race across multiple worker processes. Before scaling to multiple instances or running broader production workloads, replace startup DDL with versioned migrations run once before workers start.
