@@ -610,6 +610,16 @@ def me():
     u, out = g.u, {"name": g.u.name, "email": g.u.email, "family": None}
     if u.family_id:
         f = db.session.get(Family, u.family_id)
+        invites = []
+        if u.is_owner:
+            invites = [{"id": i.id, "email": i.email, "role": i.role or "Member",
+                        "expires": i.expires_at.isoformat() if i.expires_at else None,
+                        "status": ("accepted" if i.accepted_at else "revoked" if i.revoked_at else
+                                   "expired" if i.expires_at and i.expires_at <= datetime.utcnow() else "pending"),
+                        "delivery": i.delivery_status or "manual_share",
+                        "link": invitation_link(i) if not i.accepted_at and not i.revoked_at and
+                                (not i.expires_at or i.expires_at > datetime.utcnow()) else None}
+                       for i in Invite.query.filter_by(family_id=f.id).order_by(Invite.id.desc()).limit(50)]
         out["family"] = {"name": f.name, "plan": f.plan, "limit": LIMIT[f.plan], "owner": u.is_owner,
                          "role": "Owner" if u.is_owner else (u.role or "Member"),
                          "permissions": {"manage_members": bool(u.is_owner),
@@ -617,14 +627,7 @@ def me():
                                          "manage_billing": bool(u.is_owner)},
                          "members": [{"id": m.id, "name": m.name, "role": m.role, "owner": m.is_owner}
                                      for m in User.query.filter_by(family_id=f.id)],
-                         "invites": [{"id": i.id, "email": i.email, "role": i.role or "Member",
-                                      "expires": i.expires_at.isoformat() if i.expires_at else None,
-                                      "status": ("accepted" if i.accepted_at else "revoked" if i.revoked_at else
-                                                 "expired" if i.expires_at and i.expires_at <= datetime.utcnow() else "pending"),
-                                      "delivery": i.delivery_status or "manual_share",
-                                      "link": invitation_link(i) if not i.accepted_at and not i.revoked_at and
-                                              (not i.expires_at or i.expires_at > datetime.utcnow()) else None}
-                                     for i in Invite.query.filter_by(family_id=f.id).order_by(Invite.id.desc()).limit(50)]}
+                         "invites": invites}
     return jsonify(out)
 
 
