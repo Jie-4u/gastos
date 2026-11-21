@@ -73,9 +73,13 @@ The repository currently applies additive schema changes at app startup. The inc
 
 ## Wallets and transfers
 
-Every family gets a starter **Family cash** wallet. Parents and the owner can add family-shared wallets for cash, banks, or e-wallets such as GCash, set an opening balance, and edit or delete unused wallets. Every transaction is assigned to one wallet, so each wallet balance is calculated from its opening balance plus approved income and minus approved expenses. Household transfers move money between wallets without changing the family's total balance.
+Every family gets a starter **Family cash** wallet. Parents and the owner can add family-shared wallets for cash, banks, or e-wallets such as GCash, set an opening balance, and edit or delete unused wallets. Every transaction is assigned to one wallet, so each wallet balance is calculated from its opening balance plus approved income and minus approved expenses. Household transfers move money between wallets without changing the family's total balance; use the transfer button on a wallet row to start with that wallet already selected as the source.
 
 Wallets are shared with the whole family in this version; there are no private per-member wallets. Existing transactions are assigned to the starter wallet during startup when the database is upgraded.
+
+## Savings contributions
+
+Parents and the owner create savings goals; any family member can add a manual contribution. Each contribution records the contributor, date, amount, and optional note, and the goal detail view shows the contribution history. Contributions stop at the target amount; a completed goal cannot receive more savings. Transactions do not automatically become savings contributions in this version.
 
 ## Request limits
 
