@@ -1,5 +1,5 @@
 const app = document.getElementById('app');
-const S = { view: 'welcome', me: null, avatar: null, stack: [], k: 'expense', plan: 'budgets', filter: 'all', q: '', rows: [], bills: [], budgets: [], goals: [], id: null, invite: null, inviteInfo: null, reset: null, resetSent: null };
+const S = { view: 'welcome', me: null, avatar: null, stack: [], k: 'expense', plan: 'accounts', filter: 'all', q: '', rows: [], bills: [], budgets: [], goals: [], accounts: [], id: null, invite: null, inviteInfo: null, reset: null, resetSent: null };
 
 /* ---------- Formatting helpers ---------- */
 const peso = n => { const a = Math.abs(Number(n) || 0); return (n < 0 ? '−' : '') + '₱' + a.toLocaleString('en-PH', { minimumFractionDigits: a % 1 ? 2 : 0, maximumFractionDigits: 2 }); };
@@ -105,7 +105,7 @@ async function api(p, m = 'GET', b) {
 
 /* ---------- Shared list rows ---------- */
 const statusBadge = t => t.status === 'pending' ? ' <span class="badge warn">Pending approval</span>' : t.status === 'rejected' ? ' <span class="badge bad">Rejected</span>' : '';
-const txRow = t => { const tag = t.id && t.can_edit ? 'button' : 'div'; return `<${tag} class="item tx ${approved(t) ? 'tx-' + t.kind : 'tx-pending'}" ${tag === 'button' ? `data-go="edittx" data-id="${t.id}"` : ''}>${catIco(t.category)}<span class="grow"><b>${esc(t.note || t.category)}</b><small><span class="cchip" style="--h:${ch(t.category)}">${esc(t.category)}</span> ${esc(t.member)}${t.id ? '' : ` · ${lbl(t.date)}`}${t.has_receipt ? ' · 🧾' : ''}${statusBadge(t)}</small></span><span class="amt ${approved(t) ? t.kind : 'mu'}">${t.kind === 'income' ? '+' : '−'}${peso(t.amount)}</span></${tag}>`; };
+const txRow = t => { const tag = t.id && t.can_edit ? 'button' : 'div'; return `<${tag} class="item tx ${approved(t) ? 'tx-' + t.kind : 'tx-pending'}" ${tag === 'button' ? `data-go="edittx" data-id="${t.id}"` : ''}>${catIco(t.category)}<span class="grow"><b>${esc(t.note || t.category)}</b><small><span class="cchip" style="--h:${ch(t.category)}">${esc(t.category)}</span> ${esc(t.member)}${t.account ? ` · ${esc(t.account)}` : ''}${t.id ? '' : ` · ${lbl(t.date)}`}${t.has_receipt ? ' · 🧾' : ''}${statusBadge(t)}</small></span><span class="amt ${approved(t) ? t.kind : 'mu'}">${t.kind === 'income' ? '+' : '−'}${peso(t.amount)}</span></${tag}>`; };
 const approvalRow = t => `<div class="item">${catIco(t.category)}<span class="grow"><b>${esc(t.note || t.category)}</b><small>${esc(t.member)} · ${lbl(t.date)}</small></span><span class="end"><span class="amt">−${peso(t.amount)}</span><span class="row-acts">${t.has_receipt ? `<button class="iconbtn sm" data-act="receipt" data-id="${t.id}" aria-label="View receipt">🧾</button>` : ''}<button class="iconbtn sm" data-act="reject" data-id="${t.id}" aria-label="Reject ${esc(t.note || t.category)}">${I.x}</button><button class="btn sm soft" data-act="approve" data-id="${t.id}">${I.check}Approve</button></span></span></div>`;
 const billRow = (b, full) => { const [t, c] = due(b.due); return `<div class="item">${catIco('Bills')}<span class="grow"><b>${esc(b.name)}</b><small><span class="badge ${c}">${t}</span></small></span><span class="end"><span class="amt">${peso(b.amount)}</span>${full && manageFinances() ? `<span class="row-acts"><button class="iconbtn sm" data-go="editbill" data-id="${b.id}" aria-label="Edit ${esc(b.name)}">${I.edit}</button><button class="btn sm soft" data-act="pay" data-id="${b.id}">${I.check}Paid</button></span>` : ''}</span></div>`; };
 const budgetRow = b => {
@@ -189,8 +189,9 @@ V.home = async () => {
   const reminders = soon.length ? `<div class="alert" ${o(0)} role="status"><b>⏰ Bill reminder${soon.length > 1 ? 's' : ''}</b>${soon.map(b => `<span>${esc(b.name)}: ${due(b.due)[0].toLowerCase()} · ${peso(b.amount)}</span>`).join('')}</div>` : '';
   const approvals = d.approvals.length ? `<div class="card" ${o(0)}>${cardH(`Waiting for your approval`, `<span class="badge warn">${d.approvals.length}</span>`)}<div class="list">${d.approvals.map(approvalRow).join('')}</div></div>` : '';
   return { title: `${h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'}, ${esc(first(S.me.name))}`, sub: esc(f.name), nav: 1, right: meBtn(), html: `<div class="grid"><div class="col">${reminders}${approvals}
-  <section class="hero" ${o(1)}><small>${month} balance</small><div class="big">${peso(d.balance)}</div><div class="split"><div class="pill"><i>${I.up}</i><span><small>Income</small><b>${peso(d.income)}</b></span></div><div class="pill"><i>${I.down}</i><span><small>Expenses</small><b>${peso(d.expense)}</b></span></div></div></section>
+  <section class="hero" ${o(1)}><small>${month} flow</small><div class="big">${peso(d.balance)}</div><div class="split"><div class="pill"><i>${I.up}</i><span><small>Income</small><b>${peso(d.income)}</b></span></div><div class="pill"><i>${I.down}</i><span><small>Expenses</small><b>${peso(d.expense)}</b></span></div></div></section>
   <div class="quick" ${o(2)}><button data-go="addtx" data-k="income"><i>${I.up}</i>Income</button><button data-go="addtx" data-k="expense"><i class="ex">${I.down}</i>Expense</button>${manageFinances() ? `<button data-go="addbill"><i>${I.receipt}</i>Add bill</button><button data-go="addgoal"><i>${I.target}</i>New goal</button>` : `<button data-tab="plan" data-plan="bills"><i>${I.receipt}</i>Bills</button><button data-tab="plan" data-plan="goals"><i>${I.target}</i>Goals</button>`}</div>
+  ${d.accounts.length ? `<div class="card" ${o(3)}>${cardH('Wallets', '<button class="link" data-tab="plan" data-plan="accounts">Manage</button>')}<div class="list">${d.accounts.map(a => `<div class="item"><span class="ico">${I.brief}</span><span class="grow"><b>${esc(a.name)}</b><small>${esc(a.kind)}</small></span><span class="amt">${peso(a.balance)}</span></div>`).join('')}</div><div class="between" style="margin-top:10px"><span class="mu small">Total balance</span><b>${peso(d.total_balance)}</b></div></div>` : ''}
   <div class="card" ${o(5)}>${cardH('Recent activity', '<button class="link" data-tab="tx">See all</button>')}${d.recent.length ? `<div class="list">${d.recent.map(txRow).join('')}</div>` : empty('🧾', 'No transactions yet', 'Log your first income or expense to get started.', `<button class="btn sm" data-go="addtx" data-k="expense">${I.plus}Add transaction</button>`)}</div>
   <div class="card" ${o(6)}>${cardH('Cash flow', '<button class="link" data-tab="reports">Reports</button>')}${flowChart(d.months)}</div>
   </div><div class="col">
@@ -204,11 +205,11 @@ V.home = async () => {
 
 V.tx = async () => {
   S.rows = await api('transactions');
-  return { title: 'Activity', sub: 'Every family transaction', nav: 1, right: meBtn(), html: `<div class="stack"><label class="field" style="position:relative"><span class="sr" hidden>Search</span><span style="position:absolute;left:14px;top:14px;color:var(--faint)">${I.search}</span><input data-search placeholder="Search notes, categories or members" value="${esc(S.q)}" style="padding-left:44px" aria-label="Search transactions"></label>${seg([['all', 'All'], ['expense', 'Expenses'], ['income', 'Income']], S.filter, k => `data-filter="${k}"`)}</div><div id="txlist" class="stack">${txList()}</div>` };
+  return { title: 'Activity', sub: 'Every family transaction', nav: 1, right: meBtn(), html: `<div class="stack"><label class="field" style="position:relative"><span class="sr" hidden>Search</span><span style="position:absolute;left:14px;top:14px;color:var(--faint)">${I.search}</span><input data-search placeholder="Search notes, categories, members or wallets" value="${esc(S.q)}" style="padding-left:44px" aria-label="Search transactions"></label>${seg([['all', 'All'], ['expense', 'Expenses'], ['income', 'Income']], S.filter, k => `data-filter="${k}"`)}</div><div id="txlist" class="stack">${txList()}</div>` };
 };
 function txList() {
   if (!S.rows.length) return empty('🧾', 'No transactions yet', 'Add your first income or expense to start seeing where your money goes.', `<button class="btn" data-go="addtx" data-k="expense">${I.plus}Add transaction</button>`);
-  const q = S.q.trim().toLowerCase(), rows = S.rows.filter(t => (S.filter === 'all' || t.kind === S.filter) && (!q || [t.note, t.category, t.member].join(' ').toLowerCase().includes(q)));
+  const q = S.q.trim().toLowerCase(), rows = S.rows.filter(t => (S.filter === 'all' || t.kind === S.filter) && (!q || [t.note, t.category, t.member, t.account].join(' ').toLowerCase().includes(q)));
   if (!rows.length) return empty('🔍', 'No matches', 'Try a different search or filter.');
   const ok = rows.filter(approved), inc = sum(ok, t => t.kind === 'income' ? t.amount : 0), exp = sum(ok, t => t.kind === 'expense' ? t.amount : 0), groups = {};
   rows.forEach(t => (groups[t.date] ||= []).push(t));
@@ -223,21 +224,25 @@ const receiptBlock = url => url
   : `<label class="btn ghost">${I.camera}Scan receipt${receiptInput}</label><small class="note">Gastos reads the total and fills in the amount.</small>`;
 const catChips = (k, sel) => { const l = [...CATS[k]]; if (sel && !l.includes(sel)) l.push(sel); sel = sel || l[0]; return l.map(c => `<label class="chip"><input type="radio" name="category" value="${esc(c)}" ${c === sel ? 'checked' : ''}>${EMO[c] || '🏷️'} ${esc(c)}</label>`).join(''); };
 const txForm = t => {
-  const k = t.kind || S.k;
+  const k = t.kind || S.k, accounts = S.accounts || [], selectedAccount = t.account_id ?? accounts[0]?.id;
+  const accountField = accounts.length
+    ? field('Account', `<select name="account_id" required>${accounts.map(a => `<option value="${a.id}" ${a.id === selectedAccount ? 'selected' : ''}>${esc(a.name)} · ${peso(a.balance)}</option>`).join('')}</select>`)
+    : '<p class="note">No wallet accounts yet. Create one from Plan → Wallets.</p>';
   return `<form data-f="savetx" class="stack">${t.id ? `<input type="hidden" name="id" value="${t.id}">` : ''}
   <div class="seg">${[['expense', 'Expense'], ['income', 'Income']].map(([v, l]) => `<label><input type="radio" name="kind" value="${v}" ${k === v ? 'checked' : ''}><span>${l}</span></label>`).join('')}</div>
   <label class="amount"><span>₱</span><input name="amount" type="number" inputmode="decimal" step="0.01" min="0.01" placeholder="0" value="${t.amount ?? ''}" aria-label="Amount" required autofocus></label>
+  ${accountField}
   <fieldset class="field"><legend>Category</legend><div class="chips" id="catchips">${catChips(k, t.category)}</div></fieldset>
   <div class="two">${field('Date', `<input name="date" type="date" value="${t.date || today()}" required>`)}${field('Note', `<input name="note" maxlength="200" placeholder="What was this for?" value="${esc(t.note || '')}">`)}</div>
   ${isPrem() ? `<div class="receipt" id="rcpt">${receiptBlock(t.receipt_data)}</div>` : lock('Scan receipts with Premium', 'Snap a photo and Gastos reads the total')}
   ${t.status === 'pending' ? '<p class="note">This expense is waiting for the family owner\'s approval.</p>' : t.status === 'rejected' ? '<p class="note">The family owner rejected this expense. Edit it to send it for approval again, or delete it.</p>' : ''}
   <button class="btn lg">${t.id ? 'Save changes' : 'Save transaction'}</button>${t.id ? `<button type="button" class="btn text-danger" data-act="deltx" data-id="${t.id}">${I.trash}Delete transaction</button>` : ''}</form>`;
 };
-V.addtx = async () => ({ title: 'New transaction', back: 1, narrow: 1, html: txForm({}) });
-V.edittx = async () => ({ title: 'Edit transaction', back: 1, narrow: 1, html: txForm(await api(`transactions/${S.id}`)) });
+V.addtx = async () => { await loadAccounts(); return { title: 'New transaction', back: 1, narrow: 1, html: txForm({}) }; };
+V.edittx = async () => { await loadAccounts(); return { title: 'Edit transaction', back: 1, narrow: 1, html: txForm(await api(`transactions/${S.id}`)) }; };
 
 const P = {};
-V.plan = async () => ({ title: 'Plan', sub: 'Budgets, bills & savings goals', nav: 1, right: meBtn(), html: seg([['budgets', 'Budgets'], ['bills', 'Bills'], ['goals', 'Goals']], S.plan, k => `data-tab="plan" data-plan="${k}"`) + await P[S.plan]() });
+V.plan = async () => ({ title: 'Plan', sub: 'Wallets, bills, budgets & goals', nav: 1, right: meBtn(), html: seg([['accounts', 'Wallets'], ['budgets', 'Budgets'], ['bills', 'Bills'], ['goals', 'Goals']], S.plan, k => `data-tab="plan" data-plan="${k}"`) + await P[S.plan]() });
 P.budgets = async () => {
   const b = S.budgets = await api('budgets'), full = !isPrem() && b.length >= 3;
   const add = !manageFinances() ? '' : full ? lock('Unlimited budgets with Premium', 'The Free plan includes 3 budgets') : `<button class="btn ${b.length ? 'ghost' : ''}" data-act="budget">${I.plus}Set a budget</button>`;
@@ -257,7 +262,25 @@ P.goals = async () => {
   if (!g.length) return `<div class="card">${empty('🎯', 'Start a savings goal', 'Emergency fund, tuition, a family trip: save for it together and watch the progress.', add)}</div>`;
   return g.map(x => { const p = Math.min(100, Math.round(x.saved * 100 / x.target)); return `<div class="card goal"><span class="ring" style="--p:${p}"><span>${p}%</span></span><span class="grow"><b>${esc(x.name)}</b><small>${peso(x.saved)} of ${peso(x.target)}</small><small>${p >= 100 ? '🎉 Goal reached!' : `${peso(x.target - x.saved)} to go`}</small></span><button class="btn sm soft" data-act="fund" data-id="${x.id}">${I.plus}Add</button></div>`; }).join('') + add;
 };
+P.accounts = async () => {
+  const [a, recentTransfers] = await Promise.all([api('accounts'), api('transfers')]);
+  S.accounts = a;
+  const total = sum(a, x => x.balance);
+  const add = manageFinances() ? `<button class="btn ${a.length ? 'ghost' : ''}" data-act="account">${I.plus}Add wallet</button>` : '';
+  const transfer = manageFinances() && a.length > 1 ? `<button class="btn ghost" data-act="transfer">${I.refresh}Transfer between wallets</button>` : '';
+  if (!a.length) return `<div class="card">${empty('👛', 'No wallets yet', 'Add cash, bank, or e-wallet accounts so every transaction has a source.', add)}</div>`;
+  const history = recentTransfers.length ? `<div class="card">${cardH('Recent transfers')}<div class="list">${recentTransfers.slice(0, 5).map(x => `<div class="item"><span class="ico">${I.refresh}</span><span class="grow"><b>${esc(x.from)} → ${esc(x.to)}</b><small>${lbl(x.date)}${x.note ? ` · ${esc(x.note)}` : ''}</small></span><span class="amt">${peso(x.amount)}</span></div>`).join('')}</div></div>` : '';
+  return `<div class="card stack"><div class="between"><span><small class="mu">Total across wallets</small><h2>${peso(total)}</h2></span><span class="mu small">${a.length} wallet${a.length === 1 ? '' : 's'}</span></div></div>
+    <div class="card list">${a.map(x => `<div class="item"><span class="ico">${I.brief}</span><span class="grow"><b>${esc(x.name)}</b><small>${esc(x.kind)} · opening ${peso(x.opening_balance)}</small></span><span class="end"><span class="amt">${peso(x.balance)}</span>${manageFinances() ? `<span class="row-acts"><button class="iconbtn sm" data-act="account" data-id="${x.id}" aria-label="Edit ${esc(x.name)}">${I.edit}</button><button class="iconbtn sm" data-act="delaccount" data-id="${x.id}" aria-label="Delete ${esc(x.name)}">${I.x}</button></span>` : ''}</span></div>`).join('')}</div>
+    ${history}${manageFinances() ? `<div class="stack">${transfer}${add}</div>` : '<p class="note center">Only a Parent or family owner can add or transfer wallets.</p>'}`;
+};
 
+const ACCOUNT_KINDS = ['Cash', 'Bank', 'E-wallet', 'Credit', 'Other'];
+const accountForm = a => `<form data-f="saveaccount" class="stack">${a.id ? `<input type="hidden" name="id" value="${a.id}">` : ''}${field('Wallet name', `<input name="name" maxlength="120" placeholder="e.g. GCash, BPI savings, Cash" value="${esc(a.name || '')}" required>`)}${field('Type', `<select name="kind">${ACCOUNT_KINDS.map(k => `<option ${k === (a.kind || 'Cash') ? 'selected' : ''}>${k}</option>`).join('')}</select>`)}${field('Opening balance', `<input name="opening_balance" type="number" inputmode="decimal" step="0.01" min="0" value="${a.opening_balance ?? 0}" required>`, 'Use 0 if you are starting from an empty wallet.')}<button class="btn lg">${a.id ? 'Save changes' : 'Add wallet'}</button></form>`;
+const transferForm = () => {
+  const options = S.accounts.map(a => `<option value="${a.id}">${esc(a.name)} · ${peso(a.balance)}</option>`).join('');
+  return `<form data-f="transfer" class="stack"><div class="two">${field('From', `<select name="from_account_id" required>${options}</select>`)}${field('To', `<select name="to_account_id" required>${options}</select>`)}</div>${field('Amount', money('amount', ''))}<div class="two">${field('Date', `<input name="date" type="date" value="${today()}" required>`)}${field('Note', '<input name="note" maxlength="200" placeholder="Optional">')}</div><p class="note">Transfers move money between wallets without counting as income or spending.</p><button class="btn lg">Transfer</button></form>`;
+};
 const billForm = b => `<form data-f="savebill" class="stack">${b.id ? `<input type="hidden" name="id" value="${b.id}">` : ''}${field('Bill name', `<input name="name" maxlength="120" placeholder="e.g. Meralco, PLDT, Rent" value="${esc(b.name || '')}" required>`)}<div class="two">${field('Amount', money('amount', b.amount ?? ''))}${field('Due date', `<input name="due" type="date" value="${b.due || today()}" required>`)}</div><p class="note">Marking a bill as paid records it as a <b>Bills</b> expense automatically.</p><button class="btn lg">${b.id ? 'Save changes' : 'Add bill'}</button>${b.id ? `<button type="button" class="btn text-danger" data-act="delbill" data-id="${b.id}">${I.trash}Delete bill</button>` : ''}</form>`;
 V.addbill = async () => ({ title: 'Add a bill', back: 1, narrow: 1, html: billForm({}) });
 V.editbill = async () => ({ title: 'Edit bill', back: 1, narrow: 1, html: billForm(await api(`bills/${S.id}`)) });
@@ -347,6 +370,7 @@ addEventListener('popstate', () => {
   render();
 });
 async function loadMe() { const [me, p] = await Promise.all([api('me'), api('profile')]); S.me = me; S.avatar = p.avatar_data; }
+async function loadAccounts() { S.accounts = await api('accounts'); return S.accounts; }
 async function enter() { await loadMe(); S.stack = []; S.view = S.inviteInfo ? 'join' : S.me.family ? 'home' : 'family'; render(); }
 
 async function copy(text) { try { await navigator.clipboard.writeText(text); toast('Link copied'); } catch { toast('Copy failed: select the link and copy it manually', 1); } }
@@ -403,6 +427,8 @@ const F = {
   async savebill({ id, ...d }) { await api(id ? `bills/${id}` : 'bills', id ? 'PUT' : 'POST', d); toast(id ? 'Bill updated' : 'Bill added'); S.plan = 'bills'; back(); },
   async addgoal(d) { await api('goals', 'POST', d); toast('Goal created'); S.plan = 'goals'; back(); },
   async savebudget({ id, ...d }) { await api(id ? `budgets/${id}` : 'budgets', id ? 'PUT' : 'POST', d); closeSheet(); toast('Budget saved'); render(); },
+  async saveaccount({ id, ...d }) { await api(id ? `accounts/${id}` : 'accounts', id ? 'PUT' : 'POST', d); closeSheet(); await loadAccounts(); toast(id ? 'Wallet updated' : 'Wallet added'); render(); },
+  async transfer(d) { if (d.from_account_id === d.to_account_id) throw new Error('Choose two different wallets'); await api('transfers', 'POST', d); closeSheet(); await loadAccounts(); toast('Transfer recorded'); render(); },
   async fund(d) { const g = S.goals.find(x => x.id == d.id); await api(`goals/${d.id}/add`, 'POST', { amount: d.amount }); closeSheet(); toast(`Added ${peso(d.amount)} to ${g?.name || 'goal'}`); render(); },
   async profile(d) {
     const b = { name: d.name, email: d.email };
@@ -428,6 +454,22 @@ const A = {
   },
   async delbill(id) { if (!await ask('Delete this bill?', 'It will be removed from your family\'s reminders.', 'Delete', 1)) return; await api(`bills/${id}`, 'DELETE'); toast('Bill deleted'); back(); },
   async deltx(id) { if (!await ask('Delete this transaction?', 'This can\'t be undone and will update your family\'s totals.', 'Delete', 1)) return; await api(`transactions/${id}`, 'DELETE'); toast('Transaction deleted'); back(); },
+  account(id) {
+    const a = S.accounts.find(x => x.id == id) || {};
+    sheet(`<h3>${a.id ? 'Edit wallet' : 'Add a wallet'}</h3>${accountForm(a)}`);
+  },
+  async delaccount(id) {
+    const a = S.accounts.find(x => x.id == id);
+    if (!await ask(`Delete ${esc(a.name)}?`, 'Wallets with transactions or transfers cannot be deleted.', 'Delete', 1)) return;
+    await api(`accounts/${id}`, 'DELETE');
+    await loadAccounts();
+    toast('Wallet deleted');
+    render();
+  },
+  transfer() {
+    if (S.accounts.length < 2) return toast('Add at least two wallets first', 1);
+    sheet(`<h3>Transfer between wallets</h3>${transferForm()}`);
+  },
   budget(id) {
     const x = S.budgets.find(b => b.id == id) || {}, cats = [...CATS.expense];
     if (x.category && !cats.includes(x.category)) cats.push(x.category);
