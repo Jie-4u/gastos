@@ -98,6 +98,7 @@ reset_ser = URLSafeTimedSerializer(secret, salt="gastos-password-reset-v1")
 LIMIT = {"free": 4, "premium": 10}
 FREE_BUDGETS = 3
 FAMILY_ROLES = ("Parent", "Member")
+ACCOUNT_KINDS = ("Cash", "Bank", "E-wallet", "Credit", "Other")
 SIGNIN_IP_LIMIT = (60, 15 * 60)
 SIGNIN_EMAIL_LIMIT = (5, 15 * 60)
 SIGNUP_IP_LIMIT = (10, 60 * 60)
@@ -179,10 +180,20 @@ class RateLimit(db.Model):
     expires_at = db.Column(db.DateTime, nullable=False, index=True)
 
 
+class Account(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    family_id = db.Column(db.Integer, index=True, nullable=False)
+    name = db.Column(db.String(120), nullable=False)
+    kind = db.Column(db.String(30), nullable=False, default="Cash")
+    opening_balance = db.Column(db.Float, nullable=False, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+
 class Tx(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     family_id = db.Column(db.Integer, index=True)
     user_id = db.Column(db.Integer)
+    account_id = db.Column(db.Integer, db.ForeignKey("account.id"), index=True)
     kind = db.Column(db.String(10))  # income | expense
     amount = db.Column(db.Float)
     category = db.Column(db.String(60))
@@ -190,6 +201,18 @@ class Tx(db.Model):
     date = db.Column(db.Date, default=app_today)
     status = db.Column(db.String(12), nullable=False, default="approved", server_default="approved")  # approved | pending | rejected
     receipt_data = db.Column(db.Text)
+
+
+class Transfer(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    family_id = db.Column(db.Integer, index=True, nullable=False)
+    from_account_id = db.Column(db.Integer, nullable=False)
+    to_account_id = db.Column(db.Integer, nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    date = db.Column(db.Date, default=app_today, nullable=False)
+    note = db.Column(db.String(200), default="")
+    created_by = db.Column(db.Integer)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
 
 class Bill(db.Model):
@@ -241,7 +264,8 @@ with app.app_context():
             with db.engine.begin() as conn:
                 conn.exec_driver_sql(f"ALTER TABLE {user_table} ADD COLUMN {name} {sql}")
     tx_cols = {c["name"] for c in db.inspect(db.engine).get_columns("tx")}
-    for name, sql in {"status": "VARCHAR(12) NOT NULL DEFAULT 'approved'", "receipt_data": "TEXT"}.items():
+    for name, sql in {"status": "VARCHAR(12) NOT NULL DEFAULT 'approved'", "receipt_data": "TEXT",
+                      "account_id": "INTEGER"}.items():
         if name not in tx_cols:
             with db.engine.begin() as conn:
                 conn.exec_driver_sql(f"ALTER TABLE tx ADD COLUMN {name} {sql}")
@@ -262,6 +286,15 @@ with app.app_context():
         inv.expires_at = datetime.utcnow() + timedelta(days=7)
         signed = invite_ser.dumps({"id": inv.id, "nonce": inv.token_nonce})
         inv.token_hash = hashlib.sha256(signed.encode()).hexdigest()
+    # Existing families need at least one wallet before transactions can be assigned.
+    for family in Family.query.all():
+        account = Account.query.filter_by(family_id=family.id).order_by(Account.id).first()
+        if not account:
+            account = Account(family_id=family.id, name="Family cash", kind="Cash", opening_balance=0)
+            db.session.add(account)
+            db.session.flush()
+        Tx.query.filter_by(family_id=family.id, account_id=None).update(
+            {Tx.account_id: account.id}, synchronize_session=False)
     db.session.commit()
 
 
@@ -791,6 +824,7 @@ def make_family():
     f = Family(name=name.strip()[:120], plan="free")
     db.session.add(f)
     db.session.flush()
+    db.session.add(Account(family_id=f.id, name="Family cash", kind="Cash", opening_balance=0))
     g.u.family_id, g.u.is_owner, g.u.role = f.id, True, role
     db.session.commit()
     return jsonify(ok=1)
@@ -1207,6 +1241,51 @@ def num(v):
     return x
 
 
+def nonnegative_num(v):
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        raise ValueError("Enter an opening balance of zero or more")
+    if not math.isfinite(x) or x < 0:
+        raise ValueError("Enter an opening balance of zero or more")
+    if x > 1_000_000_000:
+        raise ValueError("Enter an amount up to ₱1,000,000,000")
+    return x
+
+
+def account_snapshot(family_id):
+    accounts = Account.query.filter_by(family_id=family_id).order_by(Account.id).all()
+    balances = {a.id: a.opening_balance or 0 for a in accounts}
+    for row in Tx.query.filter_by(family_id=family_id, status="approved"):
+        if row.account_id in balances:
+            balances[row.account_id] += row.amount if row.kind == "income" else -row.amount
+    for transfer in Transfer.query.filter_by(family_id=family_id):
+        if transfer.from_account_id in balances:
+            balances[transfer.from_account_id] -= transfer.amount
+        if transfer.to_account_id in balances:
+            balances[transfer.to_account_id] += transfer.amount
+    return [{"id": a.id, "name": a.name, "kind": a.kind,
+             "opening_balance": a.opening_balance or 0,
+             "balance": round(balances[a.id], 2)} for a in accounts]
+
+
+def default_account(family_id):
+    account = Account.query.filter_by(family_id=family_id).order_by(Account.id).first()
+    if not account:
+        account = Account(family_id=family_id, name="Family cash", kind="Cash", opening_balance=0)
+        db.session.add(account)
+        db.session.flush()
+    return account
+
+
+def account_for_family(family_id, value):
+    try:
+        account_id = int(value)
+    except (TypeError, ValueError):
+        return None
+    return Account.query.filter_by(id=account_id, family_id=family_id).first()
+
+
 def needs_approval(kind):
     """Premium families: expenses logged by non-owners wait for the owner's approval."""
     return premium() and not g.u.is_owner and kind == "expense"
@@ -1236,6 +1315,109 @@ def pdate(s):
         raise ValueError("Enter a valid date")
 
 
+@app.get("/api/accounts")
+@fam
+def accounts():
+    if not Account.query.filter_by(family_id=g.f.id).first():
+        default_account(g.f.id)
+        db.session.commit()
+    return jsonify(account_snapshot(g.f.id))
+
+
+@app.post("/api/accounts")
+@fam
+def create_account():
+    if not can_manage_finances():
+        return err("Only a Parent or the family owner can manage accounts", 403)
+    d = body()
+    name = d.get("name") if isinstance(d.get("name"), str) else ""
+    kind = d.get("kind") if isinstance(d.get("kind"), str) else "Cash"
+    if not name.strip() or len(name.strip()) > 120:
+        return err("Enter an account name")
+    if kind not in ACCOUNT_KINDS:
+        return err("Choose a supported account type")
+    try:
+        opening_balance = nonnegative_num(d.get("opening_balance", 0))
+    except ValueError as e:
+        return err(str(e))
+    account = Account(family_id=g.f.id, name=name.strip()[:120], kind=kind,
+                      opening_balance=opening_balance)
+    db.session.add(account)
+    db.session.commit()
+    return jsonify(ok=1, account={"id": account.id, "name": account.name,
+                                  "kind": account.kind, "opening_balance": account.opening_balance,
+                                  "balance": round(account.opening_balance, 2)})
+
+
+@app.route("/api/accounts/<int:i>", methods=["PUT", "DELETE"])
+@fam
+def account_detail(i):
+    if not can_manage_finances():
+        return err("Only a Parent or the family owner can manage accounts", 403)
+    account = Account.query.filter_by(id=i, family_id=g.f.id).first_or_404()
+    if request.method == "DELETE":
+        if Account.query.filter_by(family_id=g.f.id).count() <= 1:
+            return err("Keep at least one account", 409)
+        used = Tx.query.filter_by(family_id=g.f.id, account_id=i).count()
+        used += Transfer.query.filter(
+            Transfer.family_id == g.f.id,
+            db.or_(Transfer.from_account_id == i, Transfer.to_account_id == i),
+        ).count()
+        if used:
+            return err("Move or delete the transactions and transfers in this account first", 409)
+        db.session.delete(account)
+        db.session.commit()
+        return jsonify(ok=1)
+    d = body()
+    name = d.get("name") if isinstance(d.get("name"), str) else account.name
+    kind = d.get("kind") if isinstance(d.get("kind"), str) else account.kind
+    if not name.strip() or len(name.strip()) > 120:
+        return err("Enter an account name")
+    if kind not in ACCOUNT_KINDS:
+        return err("Choose a supported account type")
+    try:
+        opening_balance = nonnegative_num(d.get("opening_balance", account.opening_balance))
+    except ValueError as e:
+        return err(str(e))
+    account.name, account.kind, account.opening_balance = name.strip()[:120], kind, opening_balance
+    db.session.commit()
+    return jsonify(ok=1)
+
+
+@app.get("/api/transfers")
+@fam
+def transfers():
+    accounts_by_id = {a.id: a for a in Account.query.filter_by(family_id=g.f.id)}
+    return jsonify([{"id": t.id, "amount": t.amount, "date": t.date.isoformat(),
+                     "note": t.note,
+                     "from": accounts_by_id[t.from_account_id].name if t.from_account_id in accounts_by_id else "Account",
+                     "to": accounts_by_id[t.to_account_id].name if t.to_account_id in accounts_by_id else "Account"}
+                    for t in Transfer.query.filter_by(family_id=g.f.id).order_by(Transfer.date.desc(), Transfer.id.desc()).limit(50)])
+
+
+@app.post("/api/transfers")
+@fam
+def create_transfer():
+    if not can_manage_finances():
+        return err("Only a Parent or the family owner can transfer between accounts", 403)
+    d = body()
+    from_account = account_for_family(g.f.id, d.get("from_account_id"))
+    to_account = account_for_family(g.f.id, d.get("to_account_id"))
+    if not from_account or not to_account or from_account.id == to_account.id:
+        return err("Choose two different family accounts")
+    try:
+        amount = num(d.get("amount"))
+        transfer_date = pdate(d.get("date"))
+    except ValueError as e:
+        return err(str(e))
+    note = d.get("note") if isinstance(d.get("note"), str) else ""
+    db.session.add(Transfer(family_id=g.f.id, from_account_id=from_account.id,
+                            to_account_id=to_account.id, amount=amount,
+                            date=transfer_date, note=note[:200], created_by=g.u.id))
+    db.session.commit()
+    return jsonify(ok=1)
+
+
 @app.route("/api/transactions", methods=["GET", "POST"])
 @fam
 def txs():
@@ -1248,10 +1430,13 @@ def txs():
             return err(str(e))
         if d.get("kind") not in ("income", "expense"):
             return err("Choose income or expense")
+        account = account_for_family(g.f.id, d.get("account_id")) if d.get("account_id") not in (None, "") else default_account(g.f.id)
+        if not account:
+            return err("Choose a valid family account")
         kind = d["kind"]
         category = d.get("category") if isinstance(d.get("category"), str) else "Other"
         note = d.get("note") if isinstance(d.get("note"), str) else ""
-        row = Tx(family_id=g.f.id, user_id=g.u.id, kind=kind, amount=amt,
+        row = Tx(family_id=g.f.id, user_id=g.u.id, account_id=account.id, kind=kind, amount=amt,
                  category=(category or "Other")[:60], note=note[:200], date=tx_date,
                  status="pending" if needs_approval(kind) else "approved")
         problem = apply_receipt(row, d)
@@ -1262,7 +1447,9 @@ def txs():
         return jsonify(ok=1, status=row.status)
     rows = Tx.query.filter_by(family_id=g.f.id).order_by(Tx.date.desc(), Tx.id.desc()).limit(100)
     members = {u.id: u.name for u in User.query.filter_by(family_id=g.f.id)}
+    accounts_by_id = {a.id: a.name for a in Account.query.filter_by(family_id=g.f.id)}
     return jsonify([{"id": r.id, "kind": r.kind, "amount": r.amount, "category": r.category,
+                     "account_id": r.account_id, "account": accounts_by_id.get(r.account_id, "Family account"),
                      "note": r.note, "date": r.date.isoformat(), "member": members.get(r.user_id, "Family member"),
                      "status": r.status, "has_receipt": bool(r.receipt_data),
                      "can_edit": bool(g.u.is_owner or r.user_id == g.u.id)} for r in rows])
@@ -1295,6 +1482,13 @@ def tx_detail(i):
             return err(str(e))
         if d.get("kind") not in ("income", "expense"):
             return err("Choose income or expense")
+        if "account_id" in d:
+            account = account_for_family(g.f.id, d.get("account_id")) if d.get("account_id") not in (None, "") else default_account(g.f.id)
+            if not account:
+                return err("Choose a valid family account")
+            row.account_id = account.id
+        elif not row.account_id:
+            row.account_id = default_account(g.f.id).id
         category = d.get("category") if isinstance(d.get("category"), str) else "Other"
         note = d.get("note") if isinstance(d.get("note"), str) else ""
         row.kind, row.category, row.note = d["kind"], (category or "Other")[:60], note[:200]
@@ -1310,7 +1504,9 @@ def tx_detail(i):
             app.logger.exception("Transaction update failed")
             return err("Could not save these changes. Please refresh and try again.", 500)
         return jsonify(ok=1, status=row.status)
+    account = db.session.get(Account, row.account_id) if row.account_id else None
     return jsonify(id=row.id, kind=row.kind, amount=row.amount, category=row.category,
+                   account_id=row.account_id, account=account.name if account else "Family account",
                    note=row.note, date=row.date.isoformat(), status=row.status, receipt_data=row.receipt_data)
 
 
@@ -1364,8 +1560,10 @@ def dash():
     goals = Goal.query.filter_by(family_id=g.f.id).all()
     saved, target = sum(x.saved for x in goals), sum(x.target for x in goals)
     members = {u.id: u.name for u in User.query.filter_by(family_id=g.f.id)}
+    accounts_by_id = {a.id: a.name for a in Account.query.filter_by(family_id=g.f.id)}
     recent = [{"kind": r.kind, "amount": r.amount, "category": r.category, "note": r.note,
-               "date": r.date.isoformat(), "member": members.get(r.user_id, "Family member")}
+               "date": r.date.isoformat(), "member": members.get(r.user_id, "Family member"),
+               "account": accounts_by_id.get(r.account_id, "Family account")}
               for r in rows[:6]]
     bills = [{"id": b.id, "name": b.name, "amount": b.amount, "due": b.due.isoformat(),
               "overdue": b.due < t,
@@ -1383,8 +1581,10 @@ def dash():
                   "date": r.date.isoformat(), "member": members.get(r.user_id, "Family member"),
                   "has_receipt": bool(r.receipt_data)}
                  for r in Tx.query.filter_by(family_id=g.f.id, status="pending").order_by(Tx.date.desc())] if can_manage_finances() else []
+    account_totals = account_snapshot(g.f.id)
     totals.update(category_totals=categories, months=months, recent=recent, bills=bills,
-                   budgets=budget_progress, approvals=approvals,
+                   budgets=budget_progress, approvals=approvals, accounts=account_totals,
+                   total_balance=round(sum(a["balance"] for a in account_totals), 2),
                    savings={"saved": saved, "target": target,
                             "percent": min(100, round(saved * 100 / target)) if target else 0})
     return jsonify(totals)
@@ -1503,8 +1703,9 @@ def pay(i):
     if b.paid:
         return err("This bill has already been paid", 409)
     b.paid = True
-    db.session.add(Tx(family_id=g.f.id, user_id=g.u.id, kind="expense", amount=b.amount,
-                      category="Bills", note=b.name, date=app_today()))
+    account = default_account(g.f.id)
+    db.session.add(Tx(family_id=g.f.id, user_id=g.u.id, account_id=account.id, kind="expense",
+                      amount=b.amount, category="Bills", note=b.name, date=app_today()))
     db.session.commit()
     return jsonify(ok=1)
 
