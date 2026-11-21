@@ -288,6 +288,50 @@ class CriticalFlowTests(unittest.TestCase):
             self.assertEqual(unknown.json, response.json)
             no_account_email.assert_not_called()
 
+    def test_signin_is_rate_limited_per_account(self):
+        for _ in range(gastos.SIGNIN_EMAIL_LIMIT[0]):
+            response = self.client.post("/api/signin", json={
+                "email": "owner@example.com", "password": "wrong-password",
+            })
+            self.assertEqual(response.status_code, 401)
+        blocked = self.client.post("/api/signin", json={
+            "email": "owner@example.com", "password": "password123",
+        })
+        self.assertEqual(blocked.status_code, 429)
+        self.assertTrue(blocked.headers.get("Retry-After"))
+
+    def test_password_reset_rate_limit_keeps_generic_response(self):
+        with patch("app.send_password_reset_email", return_value="sent") as send_email:
+            responses = [
+                self.client.post("/api/password-reset/request", json={"email": "owner@example.com"})
+                for _ in range(gastos.RESET_EMAIL_LIMIT[0] + 1)
+            ]
+        self.assertTrue(all(response.status_code == 200 for response in responses))
+        self.assertEqual({response.json["message"] for response in responses}, {gastos.PASSWORD_RESET_MESSAGE})
+        self.assertEqual(send_email.call_count, 1)
+        with gastos.app.app_context():
+            self.assertGreater(
+                gastos.consume_rate_limit("reset-email", "owner@example.com", *gastos.RESET_EMAIL_LIMIT), 0
+            )
+
+    def test_signup_is_rate_limited_per_ip(self):
+        for index in range(gastos.SIGNUP_IP_LIMIT[0] - 1):
+            response = self.client.post("/api/signup", json={
+                "name": f"Signup {index}", "email": f"signup-{index}@example.com",
+                "password": "password123",
+            })
+            self.assertEqual(response.status_code, 200)
+        blocked = self.client.post("/api/signup", json={
+            "name": "Blocked", "email": "blocked-signup@example.com", "password": "password123",
+        })
+        self.assertEqual(blocked.status_code, 429)
+
+    def test_rate_limit_counter_is_enforced(self):
+        with gastos.app.app_context():
+            for _ in range(2):
+                self.assertIsNone(gastos.consume_rate_limit("test-limit", "value", 2, 60))
+            self.assertGreater(gastos.consume_rate_limit("test-limit", "value", 2, 60), 0)
+
     def test_invitation_requires_matching_email_and_owner_to_revoke(self):
         created = self.client.post("/api/invite", headers=self.owner_headers, json={"email": "intended@example.com"})
         invitation = created.json["invitation"]
