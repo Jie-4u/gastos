@@ -70,6 +70,7 @@ invite_ser = URLSafeTimedSerializer(secret, salt="gastos-invitation-v1")
 reset_ser = URLSafeTimedSerializer(secret, salt="gastos-password-reset-v1")
 LIMIT = {"free": 4, "premium": 10}
 FREE_BUDGETS = 3
+MAX_WALLETS = 10  # per account
 FAMILY_ROLES = ("Parent", "Member")
 
 
@@ -145,6 +146,27 @@ class Tx(db.Model):
     date = db.Column(db.Date, default=app_today)
     status = db.Column(db.String(12), nullable=False, default="approved", server_default="approved")  # approved | pending | rejected
     receipt_data = db.Column(db.Text)
+    wallet_id = db.Column(db.Integer, index=True)  # optional: which Cash/Card wallet this money moved through
+
+
+class Wallet(db.Model):
+    """A Cash Wallet or Card Wallet that belongs to one user account (private to that account).
+
+    Its balance is opening_balance plus the approved transactions that account linked to it.
+
+    For credit cards opening_balance is stored negative (money owed), so one formula covers every wallet.
+    Only the last 4 digits of a card are stored: never the full number, expiry or CVV.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, index=True, nullable=False)
+    kind = db.Column(db.String(10), nullable=False)  # cash | card
+    name = db.Column(db.String(80), nullable=False)
+    bank = db.Column(db.String(80))
+    card_type = db.Column(db.String(10))  # debit | credit (cards only)
+    last4 = db.Column(db.String(4))
+    credit_limit = db.Column(db.Float)
+    opening_balance = db.Column(db.Float, nullable=False, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
 class Bill(db.Model):
@@ -196,7 +218,8 @@ with app.app_context():
             with db.engine.begin() as conn:
                 conn.exec_driver_sql(f"ALTER TABLE {user_table} ADD COLUMN {name} {sql}")
     tx_cols = {c["name"] for c in db.inspect(db.engine).get_columns("tx")}
-    for name, sql in {"status": "VARCHAR(12) NOT NULL DEFAULT 'approved'", "receipt_data": "TEXT"}.items():
+    for name, sql in {"status": "VARCHAR(12) NOT NULL DEFAULT 'approved'", "receipt_data": "TEXT",
+                      "wallet_id": "INTEGER"}.items():
         if name not in tx_cols:
             with db.engine.begin() as conn:
                 conn.exec_driver_sql(f"ALTER TABLE tx ADD COLUMN {name} {sql}")
@@ -1106,6 +1129,41 @@ def pdate(s):
         raise ValueError("Enter a valid date")
 
 
+def num0(v):
+    """Like num(), but 0 is allowed (opening balances and balance corrections)."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        raise ValueError("Enter a valid amount")
+    if not math.isfinite(x) or x < 0:
+        raise ValueError("Enter an amount of 0 or more")
+    if x > 1_000_000_000:
+        raise ValueError("Enter an amount up to ₱1,000,000,000")
+    return x
+
+
+def wallet_from(d, owner_id):
+    """The wallet_id sent with a transaction: (id or None, error or None). It must be one of the owner's own wallets."""
+    raw = d.get("wallet_id")
+    if raw in (None, ""):
+        return None, None
+    try:
+        wid = int(raw)
+    except (TypeError, ValueError):
+        return None, "Choose one of your own wallets"
+    if not Wallet.query.filter_by(id=wid, user_id=owner_id).first():
+        return None, "Choose one of your own wallets"
+    return wid, None
+
+
+def tx_row(r, members, wallet_names):
+    return {"id": r.id, "kind": r.kind, "amount": r.amount, "category": r.category,
+            "note": r.note, "date": r.date.isoformat(), "member": members.get(r.user_id, "Family member"),
+            "status": r.status, "has_receipt": bool(r.receipt_data),
+            "wallet_id": r.wallet_id if r.wallet_id in wallet_names else None, "wallet": wallet_names.get(r.wallet_id),
+            "mine": r.user_id == g.u.id, "can_edit": bool(g.u.is_owner or r.user_id == g.u.id)}
+
+
 @app.route("/api/transactions", methods=["GET", "POST"])
 @fam
 def txs():
@@ -1121,9 +1179,12 @@ def txs():
         kind = d["kind"]
         category = d.get("category") if isinstance(d.get("category"), str) else "Other"
         note = d.get("note") if isinstance(d.get("note"), str) else ""
+        wallet_id, problem = wallet_from(d, g.u.id)
+        if problem:
+            return err(problem)
         row = Tx(family_id=g.f.id, user_id=g.u.id, kind=kind, amount=amt,
                  category=(category or "Other")[:60], note=note[:200], date=tx_date,
-                 status="pending" if needs_approval(kind) else "approved")
+                 status="pending" if needs_approval(kind) else "approved", wallet_id=wallet_id)
         problem = apply_receipt(row, d)
         if problem:
             return err(problem)
@@ -1132,10 +1193,8 @@ def txs():
         return jsonify(ok=1, status=row.status)
     rows = Tx.query.filter_by(family_id=g.f.id).order_by(Tx.date.desc(), Tx.id.desc()).limit(100)
     members = {u.id: u.name for u in User.query.filter_by(family_id=g.f.id)}
-    return jsonify([{"id": r.id, "kind": r.kind, "amount": r.amount, "category": r.category,
-                     "note": r.note, "date": r.date.isoformat(), "member": members.get(r.user_id, "Family member"),
-                     "status": r.status, "has_receipt": bool(r.receipt_data),
-                     "can_edit": bool(g.u.is_owner or r.user_id == g.u.id)} for r in rows])
+    wallet_names = {w.id: w.name for w in Wallet.query.filter_by(user_id=g.u.id)}
+    return jsonify([tx_row(r, members, wallet_names) for r in rows])
 
 
 @app.route("/api/transactions/<int:i>", methods=["GET", "PUT", "DELETE"])
@@ -1168,6 +1227,12 @@ def tx_detail(i):
         category = d.get("category") if isinstance(d.get("category"), str) else "Other"
         note = d.get("note") if isinstance(d.get("note"), str) else ""
         row.kind, row.category, row.note = d["kind"], (category or "Other")[:60], note[:200]
+        if "wallet_id" in d:
+            wallet_id, problem = wallet_from(d, row.user_id)
+            if problem:
+                db.session.rollback()
+                return err(problem)
+            row.wallet_id = wallet_id
         row.status = "pending" if needs_approval(row.kind) else "approved"
         problem = apply_receipt(row, d)
         if problem:
@@ -1181,7 +1246,8 @@ def tx_detail(i):
             return err("Could not save these changes. Please refresh and try again.", 500)
         return jsonify(ok=1, status=row.status)
     return jsonify(id=row.id, kind=row.kind, amount=row.amount, category=row.category,
-                   note=row.note, date=row.date.isoformat(), status=row.status, receipt_data=row.receipt_data)
+                   note=row.note, date=row.date.isoformat(), status=row.status, receipt_data=row.receipt_data,
+                   wallet_id=row.wallet_id if row.user_id == g.u.id else None, mine=row.user_id == g.u.id)
 
 
 @app.post("/api/transactions/<int:i>/<any(approve, reject):decision>")
@@ -1234,8 +1300,11 @@ def dash():
     goals = Goal.query.filter_by(family_id=g.f.id).all()
     saved, target = sum(x.saved for x in goals), sum(x.target for x in goals)
     members = {u.id: u.name for u in User.query.filter_by(family_id=g.f.id)}
+    wallet_data = wallet_overview()
+    wallet_names = {w["id"]: w["name"] for w in wallet_data["wallets"]}
     recent = [{"kind": r.kind, "amount": r.amount, "category": r.category, "note": r.note,
-               "date": r.date.isoformat(), "member": members.get(r.user_id, "Family member")}
+               "date": r.date.isoformat(), "member": members.get(r.user_id, "Family member"),
+               "wallet": wallet_names.get(r.wallet_id)}
               for r in rows[:6]]
     bills = [{"id": b.id, "name": b.name, "amount": b.amount, "due": b.due.isoformat(),
               "overdue": b.due < t,
@@ -1255,6 +1324,8 @@ def dash():
                  for r in Tx.query.filter_by(family_id=g.f.id, status="pending").order_by(Tx.date.desc())] if can_manage_finances() else []
     totals.update(category_totals=categories, months=months, recent=recent, bills=bills,
                    budgets=budget_progress, approvals=approvals,
+                   wallets=wallet_data["wallets"][:3], wallet_count=len(wallet_data["wallets"]),
+                   wallet_totals=wallet_data["totals"],
                    savings={"saved": saved, "target": target,
                             "percent": min(100, round(saved * 100 / target)) if target else 0})
     return jsonify(totals)
@@ -1467,6 +1538,149 @@ def budget_detail(i):
     if other:
         return err("A budget already exists for that category")
     budget.category, budget.monthly_limit = category.strip(), monthly_limit
+    db.session.commit()
+    return jsonify(ok=1)
+
+
+# ---------- Bank wallets: Cash Wallet and Card Wallet (one set per user account) ----------
+
+def wallet_sums(since=None):
+    """{wallet_id: {"income": x, "expense": y}} for the signed-in account's approved, wallet-linked transactions."""
+    q = db.session.query(Tx.wallet_id, Tx.kind, db.func.sum(Tx.amount)).filter(
+        Tx.user_id == g.u.id, Tx.status == "approved", Tx.wallet_id.isnot(None))
+    if since:
+        q = q.filter(Tx.date >= since)
+    out = {}
+    for wid, kind, total in q.group_by(Tx.wallet_id, Tx.kind):
+        out.setdefault(wid, {"income": 0.0, "expense": 0.0})[kind] = float(total or 0)
+    return out
+
+
+def is_credit(w):
+    return w.kind == "card" and w.card_type == "credit"
+
+
+def wallet_json(w, sums, month_sums):
+    s, m = sums.get(w.id, {}), month_sums.get(w.id, {})
+    income, expense = s.get("income", 0.0), s.get("expense", 0.0)
+    balance = round((w.opening_balance or 0) + income - expense, 2)
+    out = {"id": w.id, "kind": w.kind, "name": w.name, "bank": w.bank, "card_type": w.card_type,
+           "last4": w.last4, "credit_limit": w.credit_limit, "balance": balance,
+           "income": income, "expense": expense,
+           "month_income": m.get("income", 0.0), "month_expense": m.get("expense", 0.0)}
+    if is_credit(w):
+        out["owed"] = round(max(0.0, -balance), 2)
+        out["available"] = round(max(0.0, w.credit_limit + balance), 2) if w.credit_limit else None
+    return out
+
+
+def wallet_overview():
+    """The signed-in account's wallets (cash first) with live balances, plus totals."""
+    sums, month_sums = wallet_sums(), wallet_sums(app_today().replace(day=1))
+    rows = sorted(Wallet.query.filter_by(user_id=g.u.id).all(), key=lambda w: (w.kind != "cash", w.id))
+    wallets = [wallet_json(w, sums, month_sums) for w in rows]
+    cash = sum(w["balance"] for w in wallets if w["kind"] == "cash")
+    debit = sum(w["balance"] for w in wallets if w["kind"] == "card" and w["card_type"] != "credit")
+    owed = sum(w["owed"] for w in wallets if w["card_type"] == "credit" and w["kind"] == "card")
+    return {"wallets": wallets, "totals": {"cash": round(cash, 2), "debit": round(debit, 2),
+                                           "available": round(cash + debit, 2), "owed": round(owed, 2)}}
+
+
+def parse_wallet(d, kind, with_balance=True):
+    """Validated wallet fields from a request body. Raises ValueError with a user-facing message."""
+    name = d.get("name") if isinstance(d.get("name"), str) else ""
+    name = name.strip()
+    if not name:
+        raise ValueError("Wallet name required")
+    if len(name) > 80:
+        raise ValueError("Wallet name must be 80 characters or fewer")
+    out = {"name": name}
+    raw = d.get("opening_balance")
+    amount = 0.0 if raw in (None, "") else num0(raw)
+    if kind == "cash":
+        out.update(bank=None, card_type=None, last4=None, credit_limit=None)
+        if with_balance:
+            out["opening_balance"] = amount
+        return out
+    bank = d.get("bank") if isinstance(d.get("bank"), str) else ""
+    out["bank"] = bank.strip()[:80] or None
+    card_type = d.get("card_type")
+    if card_type not in ("debit", "credit"):
+        raise ValueError("Choose debit or credit")
+    last4 = str(d.get("last4") if d.get("last4") is not None else "").strip()
+    if not re.fullmatch(r"\d{4}", last4):
+        raise ValueError("Enter only the last 4 digits of the card")
+    out.update(card_type=card_type, last4=last4)
+    limit = d.get("credit_limit")
+    out["credit_limit"] = num(limit) if card_type == "credit" and limit not in (None, "") else None
+    if with_balance:
+        out["opening_balance"] = -amount if card_type == "credit" else amount  # credit: stored as money owed
+    return out
+
+
+def own_wallet(i):
+    return Wallet.query.filter_by(id=i, user_id=g.u.id).first_or_404()
+
+
+@app.route("/api/wallets", methods=["GET", "POST"])
+@fam
+def wallets():
+    if request.method == "POST":
+        d = body()
+        kind = d.get("kind")
+        if kind not in ("cash", "card"):
+            return err("Choose a cash wallet or a card")
+        if Wallet.query.filter_by(user_id=g.u.id).count() >= MAX_WALLETS:
+            return err(f"An account can have up to {MAX_WALLETS} wallets")
+        try:
+            fields = parse_wallet(d, kind)
+        except ValueError as e:
+            return err(str(e))
+        wallet = Wallet(user_id=g.u.id, kind=kind, **fields)
+        db.session.add(wallet)
+        db.session.commit()
+        return jsonify(ok=1, id=wallet.id)
+    return jsonify(wallet_overview())
+
+
+@app.route("/api/wallets/<int:i>", methods=["GET", "PUT", "DELETE"])
+@fam
+def wallet_detail(i):
+    wallet = own_wallet(i)
+    if request.method == "DELETE":
+        # The transactions stay in the family's history; they just stop pointing at this wallet.
+        Tx.query.filter_by(user_id=g.u.id, wallet_id=wallet.id).update({"wallet_id": None})
+        db.session.delete(wallet)
+        db.session.commit()
+        return jsonify(ok=1)
+    if request.method == "PUT":
+        try:
+            fields = parse_wallet({**body(), "card_type": wallet.card_type}, wallet.kind, with_balance=False)
+        except ValueError as e:
+            return err(str(e))
+        for key, value in fields.items():
+            setattr(wallet, key, value)
+        db.session.commit()
+        return jsonify(ok=1)
+    out = wallet_json(wallet, wallet_sums(), wallet_sums(app_today().replace(day=1)))
+    members = {u.id: u.name for u in User.query.filter_by(family_id=g.f.id)}
+    rows = Tx.query.filter_by(user_id=g.u.id, wallet_id=wallet.id).order_by(Tx.date.desc(), Tx.id.desc()).limit(30)
+    out["transactions"] = [tx_row(r, members, {wallet.id: wallet.name}) for r in rows]
+    return jsonify(out)
+
+
+@app.post("/api/wallets/<int:i>/adjust")
+@fam
+def wallet_adjust(i):
+    """Correct a wallet to match reality: cash/debit balance, or the amount currently owed on a credit card."""
+    wallet = own_wallet(i)
+    try:
+        target = num0(body().get("amount"))
+    except ValueError as e:
+        return err(str(e))
+    s = wallet_sums().get(wallet.id, {})
+    flow = s.get("income", 0.0) - s.get("expense", 0.0)
+    wallet.opening_balance = round((-target if is_credit(wallet) else target) - flow, 2)
     db.session.commit()
     return jsonify(ok=1)
 
