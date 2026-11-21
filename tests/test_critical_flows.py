@@ -346,6 +346,87 @@ class CriticalFlowTests(unittest.TestCase):
         self.assertEqual(self.client.post(f"/api/invitations/{invitation['id']}/revoke", headers=self.owner_headers).status_code, 200)
         self.assertEqual(self.client.get(f"/api/invitations/{token}").status_code, 404)
 
+    def test_family_gets_default_wallet_and_transactions_use_it(self):
+        accounts = self.client.get("/api/accounts", headers=self.owner_headers).json
+        self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["name"], "Family cash")
+        self.client.post("/api/transactions", headers=self.owner_headers, json={
+            "kind": "expense", "amount": 20, "category": "Food",
+        })
+        row = self.client.get("/api/transactions", headers=self.owner_headers).json[0]
+        self.assertEqual(row["account_id"], accounts[0]["id"])
+        self.assertEqual(row["account"], "Family cash")
+        detail = self.client.get(f"/api/transactions/{row['id']}", headers=self.owner_headers).json
+        self.assertEqual(detail["account_id"], accounts[0]["id"])
+        self.assertEqual(detail["account"], "Family cash")
+
+    def test_wallet_balances_track_transactions_and_transfers(self):
+        default_id = self.client.get("/api/accounts", headers=self.owner_headers).json[0]["id"]
+        created = self.client.post("/api/accounts", headers=self.owner_headers, json={
+            "name": "GCash", "kind": "E-wallet", "opening_balance": 100,
+        })
+        self.assertEqual(created.status_code, 200)
+        gcash_id = created.json["account"]["id"]
+        self.client.post("/api/transactions", headers=self.owner_headers, json={
+            "kind": "income", "amount": 50, "category": "Allowance", "account_id": gcash_id,
+        })
+        self.client.post("/api/transactions", headers=self.owner_headers, json={
+            "kind": "expense", "amount": 20, "category": "Food", "account_id": default_id,
+        })
+        transferred = self.client.post("/api/transfers", headers=self.owner_headers, json={
+            "from_account_id": gcash_id, "to_account_id": default_id,
+            "amount": 30, "date": date.today().isoformat(), "note": "Cash out",
+        })
+        self.assertEqual(transferred.status_code, 200)
+        balances = {a["name"]: a["balance"] for a in self.client.get(
+            "/api/accounts", headers=self.owner_headers).json}
+        self.assertEqual(balances["Family cash"], 10)
+        self.assertEqual(balances["GCash"], 120)
+        self.assertEqual(self.client.get("/api/dashboard", headers=self.owner_headers).json["total_balance"], 130)
+
+    def test_members_can_view_wallets_but_cannot_manage_them(self):
+        account_id = self.client.get("/api/accounts", headers=self.owner_headers).json[0]["id"]
+        invite = self.client.post("/api/invite", headers=self.owner_headers,
+                                  json={"email": "wallet-member@example.com"}).json["invitation"]
+        signup = self.client.post("/api/signup", json={
+            "name": "Wallet Member", "email": "wallet-member@example.com", "password": "password123",
+            "invite_token": invite["link"].split("invite=", 1)[1],
+        })
+        member_headers = {"Authorization": f"Bearer {signup.json['token']}"}
+        self.assertEqual(self.client.get("/api/accounts", headers=member_headers).status_code, 200)
+        self.assertEqual(self.client.post("/api/accounts", headers=member_headers,
+            json={"name": "Member cash", "kind": "Cash"}).status_code, 403)
+        self.assertEqual(self.client.post("/api/transfers", headers=member_headers, json={
+            "from_account_id": account_id, "to_account_id": account_id, "amount": 1,
+        }).status_code, 403)
+        self.assertEqual(self.client.post("/api/transactions", headers=member_headers, json={
+            "kind": "expense", "amount": 10, "category": "Food", "account_id": account_id,
+        }).status_code, 200)
+
+    def test_wallet_ids_are_family_scoped_and_used_wallets_are_protected(self):
+        default_id = self.client.get("/api/accounts", headers=self.owner_headers).json[0]["id"]
+        created = self.client.post("/api/accounts", headers=self.owner_headers, json={
+            "name": "Savings", "kind": "Bank", "opening_balance": 0,
+        })
+        savings_id = created.json["account"]["id"]
+        self.assertEqual(self.client.delete(f"/api/accounts/{savings_id}",
+                                            headers=self.owner_headers).status_code, 200)
+        self.client.post("/api/transactions", headers=self.owner_headers, json={
+            "kind": "expense", "amount": 5, "category": "Food", "account_id": default_id,
+        })
+        self.assertEqual(self.client.delete(f"/api/accounts/{default_id}",
+                                            headers=self.owner_headers).status_code, 409)
+
+        other = self.client.post("/api/signup", json={
+            "name": "Other", "email": "wallet-other@example.com", "password": "password123",
+        })
+        other_headers = {"Authorization": f"Bearer {other.json['token']}"}
+        self.client.post("/api/family", headers=other_headers, json={"name": "Other Family"})
+        other_account_id = self.client.get("/api/accounts", headers=other_headers).json[0]["id"]
+        self.assertEqual(self.client.post("/api/transactions", headers=self.owner_headers, json={
+            "kind": "expense", "amount": 5, "category": "Food", "account_id": other_account_id,
+        }).status_code, 400)
+
     def test_invalid_money_dates_and_repeat_bill_payment_are_rejected(self):
         bad_amount = self.client.post("/api/transactions", headers=self.owner_headers,
                                       json={"amount": "NaN", "kind": "expense"})
