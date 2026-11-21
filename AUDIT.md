@@ -4,7 +4,7 @@
 
 - Flask serves the UI and JSON API from one process (`app.py`).
 - The browser UI is vanilla JavaScript and CSS in `public/`; there is no frontend build step.
-- Flask-SQLAlchemy uses SQLite by default (`instance/gastos.db`) and can use PostgreSQL through `DATABASE_URL`.
+- Flask-SQLAlchemy uses SQLite in development (`instance/gastos.db`) and requires PostgreSQL in production through `DATABASE_URL`.
 - Passwords use Werkzeug password hashing. Bearer sessions use signed `itsdangerous` tokens.
 - The schema is created with `db.create_all()` plus additive compatibility changes at startup. The starting repository lacked a migration framework, provider adapters, tests, project README, and external integration instructions; the local `.env` now contains the user-configured service settings.
 
@@ -77,8 +77,8 @@
 
 - Copy `.env.example` to `.env`, install `requirements.txt`, then run `python app.py`. Details are in [docs/SETUP.md](docs/SETUP.md).
 - Run regression checks with `python -m unittest discover -s tests`.
-- `DATABASE_URL` is optional; unset uses SQLite. PostgreSQL URLs are supported.
-- Production requires `APP_ENV=production`, a strong `SECRET_KEY`, and canonical HTTPS `APP_BASE_URL`.
+- `DATABASE_URL` is optional in development/test; unset uses SQLite. Production requires a PostgreSQL URL.
+- Startup requires an explicit `APP_ENV` of `development`, `test`, or `production`. Production also requires a persistent 32+ character `SECRET_KEY`, canonical HTTPS `APP_BASE_URL`, and PostgreSQL; unsafe configuration fails before the app serves traffic.
 - SMTP variables are private local configuration. Delivery logic is covered with a mocked SMTP server; a real Brevo delivery is not yet verified.
 - PayMongo checkout and webhook handling are implemented and mocked in regression tests. Real checkout is not verified; the account previously returned HTTP 403 for subscription plans and still needs capability activation, test plan IDs, and a registered webhook.
 
