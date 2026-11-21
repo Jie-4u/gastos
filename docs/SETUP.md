@@ -38,7 +38,7 @@ The same SMTP sender is used for password-reset messages. Reset links are signed
 
 For local end-to-end testing, set `APP_BASE_URL=http://127.0.0.1:5000` and restart Gastos. Create an invitation for an inbox you can open on the **same computer**. Brevo can deliver the message, and the link opens your local app in that computer's browser. The link is not reachable from another person's device because `127.0.0.1` always means "this device." For another device or remote tester, use a running HTTPS tunnel or a staging deployment and set `APP_BASE_URL` to that reachable HTTPS address for the entire test. Restart Gastos after switching the URL and resend invitations created under the previous URL.
 
-Invitees who create an account from the invitation are added to the family as **Members** during signup and signed in automatically. If that browser is currently signed in as a different user (common when testing locally), the invitation screen asks the tester to sign in or create an account using the invited email before accepting. Members can view shared family dashboards, reports, transactions, bills, budgets, and goals; add and edit their own transactions; and contribute to savings goals. Only the owner can change other members' transactions, manage bills/budgets/goals, invite/remove members, or manage the subscription. These rules are enforced by the API as well as reflected in the interface.
+Invitees who create an account from the invitation are added to the family as **Members** during signup and signed in automatically. If that browser is currently signed in as a different user (common when testing locally), the invitation screen asks the tester to sign in or create an account using the invited email before accepting. Members can view shared family dashboards, reports, transactions, bills, budgets, goals, and wallets; add and edit their own transactions; and contribute to savings goals. Parents and the owner can manage bills, budgets, goals, wallets, and expense approvals. Only the owner can change other members' transactions, invite/remove members, change roles, or manage the subscription. These rules are enforced by the API as well as reflected in the interface.
 
 The app generates links at `APP_BASE_URL/?invite=...`. Localhost links only work on the computer running Gastos. For a temporary remote demo, ngrok can expose port 5000, but its agent must stay online and its address can change. A link to an offline ngrok endpoint cannot be repaired by Brevo; the invitation has to be resent after the permanent address is available. For real users, deploy Gastos and use a stable HTTPS hosting URL or a custom domain. Gastos and its API are served from the same origin, so that single URL serves both.
 
@@ -70,6 +70,12 @@ Other suitable options are Railway, Fly.io, or a VPS. Each needs a persistent Po
 - Serve the app behind HTTPS and use a production WSGI server. Direct `python app.py` startup enables debug mode only when `FLASK_DEBUG=1`.
 
 The repository currently applies additive schema changes at app startup. The included Gunicorn command uses one worker because startup schema changes are not safe to race across multiple worker processes. Before scaling to multiple instances or running broader production workloads, replace startup DDL with versioned migrations run once before workers start.
+
+## Wallets and transfers
+
+Every family gets a starter **Family cash** wallet. Parents and the owner can add family-shared wallets for cash, banks, or e-wallets such as GCash, set an opening balance, and edit or delete unused wallets. Every transaction is assigned to one wallet, so each wallet balance is calculated from its opening balance plus approved income and minus approved expenses. Household transfers move money between wallets without changing the family's total balance.
+
+Wallets are shared with the whole family in this version; there are no private per-member wallets. Existing transactions are assigned to the starter wallet during startup when the database is upgraded.
 
 ## Request limits
 
