@@ -232,6 +232,18 @@ class Goal(db.Model):
     saved = db.Column(db.Float, default=0)
 
 
+class GoalContribution(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    family_id = db.Column(db.Integer, index=True, nullable=False)
+    goal_id = db.Column(db.Integer, index=True, nullable=False)
+    user_id = db.Column(db.Integer)
+    member_name = db.Column(db.String(120))
+    amount = db.Column(db.Float, nullable=False)
+    note = db.Column(db.String(200), default="")
+    date = db.Column(db.Date, default=app_today, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+
 class Budget(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     family_id = db.Column(db.Integer, index=True, nullable=False)
@@ -295,6 +307,12 @@ with app.app_context():
             db.session.flush()
         Tx.query.filter_by(family_id=family.id, account_id=None).update(
             {Tx.account_id: account.id}, synchronize_session=False)
+    # Preserve savings totals from before contribution history existed.
+    for goal in Goal.query.all():
+        if (goal.saved or 0) > 0 and not GoalContribution.query.filter_by(goal_id=goal.id).first():
+            db.session.add(GoalContribution(family_id=goal.family_id, goal_id=goal.id,
+                                            amount=goal.saved, member_name="Opening balance",
+                                            note="Imported before contribution history"))
     db.session.commit()
 
 
@@ -1727,20 +1745,50 @@ def goals():
         db.session.add(Goal(family_id=g.f.id, name=name.strip()[:120], target=tgt, saved=0))
         db.session.commit()
         return jsonify(ok=1)
-    return jsonify([{"id": x.id, "name": x.name, "target": x.target, "saved": x.saved}
-                    for x in Goal.query.filter_by(family_id=g.f.id)])
+    goals = Goal.query.filter_by(family_id=g.f.id).all()
+    counts = {goal.id: GoalContribution.query.filter_by(goal_id=goal.id).count() for goal in goals}
+    return jsonify([{"id": x.id, "name": x.name, "target": x.target, "saved": x.saved,
+                     "remaining": max(0, round(x.target - x.saved, 2)),
+                     "contributions": counts.get(x.id, 0)}
+                    for x in goals])
+
+
+@app.get("/api/goals/<int:i>")
+@fam
+def goal_detail(i):
+    goal = Goal.query.filter_by(id=i, family_id=g.f.id).first_or_404()
+    contributions = GoalContribution.query.filter_by(
+        goal_id=goal.id, family_id=g.f.id
+    ).order_by(GoalContribution.date.desc(), GoalContribution.id.desc()).limit(100).all()
+    return jsonify(id=goal.id, name=goal.name, target=goal.target, saved=goal.saved,
+                   remaining=max(0, round(goal.target - goal.saved, 2)),
+                   contributions=[{"id": c.id, "amount": c.amount, "note": c.note,
+                                   "date": c.date.isoformat(),
+                                   "member": c.member_name or "Family member"}
+                                  for c in contributions])
 
 
 @app.post("/api/goals/<int:i>/add")
 @fam
 def goal_add(i):
-    x = Goal.query.filter_by(id=i, family_id=g.f.id).first_or_404()
+    goal = Goal.query.filter_by(id=i, family_id=g.f.id).first_or_404()
+    d = body()
     try:
-        x.saved += num(body().get("amount"))
+        amount = num(d.get("amount"))
     except ValueError as e:
         return err(str(e))
+    remaining = max(0, round(goal.target - goal.saved, 2))
+    if remaining <= 0:
+        return err("This savings goal has already been reached", 409)
+    if amount > remaining + 0.005:
+        return err(f"You can add up to {remaining:.2f} to this goal", 409)
+    note = d.get("note") if isinstance(d.get("note"), str) else ""
+    contribution = GoalContribution(family_id=g.f.id, goal_id=goal.id, user_id=g.u.id,
+                                    member_name=g.u.name[:120], amount=amount, note=note[:200])
+    goal.saved = round(goal.saved + amount, 2)
+    db.session.add(contribution)
     db.session.commit()
-    return jsonify(ok=1)
+    return jsonify(ok=1, saved=goal.saved, remaining=max(0, round(goal.target - goal.saved, 2)))
 
 
 @app.route("/api/budgets", methods=["GET", "POST"])
