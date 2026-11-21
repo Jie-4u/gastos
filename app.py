@@ -38,32 +38,58 @@ APP_TIMEZONE = timezone(timedelta(hours=8), "Asia/Manila")
 def app_today():
     return datetime.now(APP_TIMEZONE).date()
 
-app = Flask(__name__, static_folder="public", static_url_path="")
-secret = os.environ.get("SECRET_KEY")
-if not secret and os.environ.get("APP_ENV") == "production":
-    raise RuntimeError("SECRET_KEY must be configured in production")
-secret = secret or "local-development-only-change-me"
-url = os.environ.get("DATABASE_URL", "sqlite:///gastos.db")
-if url.startswith(("postgres://", "postgresql://")):
-    # Name the installed driver: SQLAlchemy 2.1 otherwise defaults to psycopg 3, which isn't in requirements.txt.
-    url = "postgresql+psycopg2://" + url.split("://", 1)[1]
+LEGACY_INSECURE_SECRET = "local-development-only-change-me"  # rejected; never used as a fallback
+ALLOWED_APP_ENVS = ("development", "test", "production")
+
+
 def configured_app_base_url():
     return os.environ.get("APP_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
 
 
-if os.environ.get("APP_ENV") == "production":
-    configured_base = configured_app_base_url()
-    if not configured_base:
-        raise RuntimeError("APP_BASE_URL or the hosting platform's public HTTPS URL must be configured in production")
-    public_url = urlsplit(configured_base)
-    if public_url.scheme != "https" or not public_url.netloc or public_url.username or public_url.password:
-        raise RuntimeError("APP_BASE_URL must be a public HTTPS origin in production")
-    if public_url.path not in ("", "/") or public_url.query or public_url.fragment:
-        raise RuntimeError("APP_BASE_URL must be an origin without a path, query, or fragment")
-    if url.startswith("sqlite:"):
-        raise RuntimeError("DATABASE_URL must point to persistent PostgreSQL in production")
+def runtime_config():
+    """Read runtime settings and fail closed when configuration is unsafe."""
+    environment = (os.environ.get("APP_ENV") or "").strip().lower()
+    if environment not in ALLOWED_APP_ENVS:
+        raise RuntimeError("APP_ENV must be explicitly set to development, test, or production")
+    secret_key = (os.environ.get("SECRET_KEY") or "").strip()
+    generated_secret = False
+    if not secret_key:
+        if environment == "production":
+            raise RuntimeError("SECRET_KEY must be configured in production")
+        secret_key = secrets.token_urlsafe(48)
+        generated_secret = True
+    if secret_key == LEGACY_INSECURE_SECRET:
+        raise RuntimeError("SECRET_KEY must not use the old development placeholder")
+    if environment == "production" and len(secret_key) < 32:
+        raise RuntimeError("SECRET_KEY must be at least 32 characters in production")
+    database_url = (os.environ.get("DATABASE_URL") or "").strip()
+    if not database_url:
+        if environment == "production":
+            raise RuntimeError("DATABASE_URL must be configured in production")
+        database_url = "sqlite:///gastos.db"
+    if database_url.startswith(("postgres://", "postgresql://")):
+        # Name the installed driver: SQLAlchemy 2.1 otherwise defaults to psycopg 3, which isn't in requirements.txt.
+        database_url = "postgresql+psycopg2://" + database_url.split("://", 1)[1]
+    if environment == "production":
+        configured_base = configured_app_base_url()
+        if not configured_base:
+            raise RuntimeError("APP_BASE_URL or the hosting platform's public HTTPS URL must be configured in production")
+        public_url = urlsplit(configured_base)
+        if public_url.scheme != "https" or not public_url.netloc or public_url.username or public_url.password:
+            raise RuntimeError("APP_BASE_URL must be a public HTTPS origin in production")
+        if public_url.path not in ("", "/") or public_url.query or public_url.fragment:
+            raise RuntimeError("APP_BASE_URL must be an origin without a path, query, or fragment")
+        if not database_url.startswith("postgresql"):
+            raise RuntimeError("DATABASE_URL must point to persistent PostgreSQL in production")
+    return environment, secret_key, database_url, generated_secret
+
+
+APP_ENV, secret, url, generated_secret = runtime_config()
+app = Flask(__name__, static_folder="public", static_url_path="")
 app.config.update(SQLALCHEMY_DATABASE_URI=url,
                   SQLALCHEMY_ENGINE_OPTIONS={"pool_pre_ping": True})
+if generated_secret:
+    app.logger.warning("SECRET_KEY is not set; using an ephemeral %s key. Sessions will reset when the process restarts.", APP_ENV)
 db = SQLAlchemy(app)
 ser = URLSafeTimedSerializer(secret)
 invite_ser = URLSafeTimedSerializer(secret, salt="gastos-invitation-v1")
@@ -316,7 +342,7 @@ def public_app_link(params):
     if (parts.scheme not in ("http", "https") or not parts.netloc or parts.username or parts.password
             or parts.query or parts.fragment):
         raise RuntimeError("APP_BASE_URL must be a valid public app origin without credentials, query, or fragment")
-    if os.environ.get("APP_ENV") == "production" and parts.scheme != "https":
+    if APP_ENV == "production" and parts.scheme != "https":
         raise RuntimeError("APP_BASE_URL must use HTTPS in production")
     return f"{base.rstrip('/')}/?{urlencode(params)}"
 
