@@ -24,7 +24,8 @@
 - [x] Enforce an eight-character minimum password and validate required signup fields.
 - [x] Keep password hashing and signed session tokens.
 - [x] Add one-time, 15-minute password reset links with generic responses and session invalidation.
-- [ ] Add account verification and broader per-IP rate limiting.
+- [x] Add broader per-IP, account, and email rate limiting.
+- [ ] Add account verification.
 
 ### Family and invitations
 
