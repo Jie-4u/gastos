@@ -68,11 +68,11 @@
 - [x] Require `SECRET_KEY` and `APP_BASE_URL` in production configuration for relevant flows.
 - [x] Add regression tests for Free defaults, fail-closed Premium, invitation expiry/resend/revocation/acceptance/signup, email matching and HTML delivery, password reset, transaction/budget behavior, family isolation, and duplicate bill payment prevention.
 - [ ] Add end-to-end testing against real ngrok, Brevo, and an activated PayMongo test account.
-- [ ] Configure deployment HTTPS, CSRF strategy, rate limiting, database access policies, and production logging.
+- [ ] Configure deployment HTTPS, CSRF strategy, database access policies, and production logging.
 
 ## Database changes
 
-`Invite` gained token digest/nonce, role, inviter, timestamps, and revocation/acceptance fields. Startup applies additive `ALTER TABLE` changes for existing databases, while `create_all()` creates the new subscription table. Existing data is preserved. There is no migration runner in this repository; a formal versioned migration framework should replace startup DDL before multi-instance production deployment.
+`Invite` gained token digest/nonce, role, inviter, timestamps, and revocation/acceptance fields. The newer data model adds family-shared `Account` rows and `Transfer` rows, plus `Tx.account_id`; startup creates the new tables, adds the transaction column, creates a starter wallet for each existing family, and backfills existing transactions. Existing data is preserved. There is no migration runner in this repository; a formal versioned migration framework should replace startup DDL before multi-instance production deployment.
 
 ## Configuration and running
 
