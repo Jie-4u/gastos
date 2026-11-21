@@ -184,6 +184,7 @@ V.invite = async () => ({ title: 'Invite your family', sub: 'Almost done', narro
 V.home = async () => {
   const d = await api('dashboard'), f = S.me.family, h = new Date().getHours();
   S.bills = d.bills;
+  S.accounts = d.accounts;
   const month = new Date().toLocaleDateString('en-PH', { month: 'long' });
   const o = n => `style="order:${n}"`, soon = isPrem() ? d.bills.filter(b => days(b.due) <= 3) : [];
   const reminders = soon.length ? `<div class="alert" ${o(0)} role="status"><b>⏰ Bill reminder${soon.length > 1 ? 's' : ''}</b>${soon.map(b => `<span>${esc(b.name)}: ${due(b.due)[0].toLowerCase()} · ${peso(b.amount)}</span>`).join('')}</div>` : '';
@@ -191,7 +192,7 @@ V.home = async () => {
   return { title: `${h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'}, ${esc(first(S.me.name))}`, sub: esc(f.name), nav: 1, right: meBtn(), html: `<div class="grid"><div class="col">${reminders}${approvals}
   <section class="hero" ${o(1)}><small>${month} flow</small><div class="big">${peso(d.balance)}</div><div class="split"><div class="pill"><i>${I.up}</i><span><small>Income</small><b>${peso(d.income)}</b></span></div><div class="pill"><i>${I.down}</i><span><small>Expenses</small><b>${peso(d.expense)}</b></span></div></div></section>
   <div class="quick" ${o(2)}><button data-go="addtx" data-k="income"><i>${I.up}</i>Income</button><button data-go="addtx" data-k="expense"><i class="ex">${I.down}</i>Expense</button>${manageFinances() ? `<button data-go="addbill"><i>${I.receipt}</i>Add bill</button><button data-go="addgoal"><i>${I.target}</i>New goal</button>` : `<button data-tab="plan" data-plan="bills"><i>${I.receipt}</i>Bills</button><button data-tab="plan" data-plan="goals"><i>${I.target}</i>Goals</button>`}</div>
-  ${d.accounts.length ? `<div class="card" ${o(3)}>${cardH('Wallets', '<button class="link" data-tab="plan" data-plan="accounts">Manage</button>')}<div class="list">${d.accounts.map(a => `<div class="item"><span class="ico">${I.brief}</span><span class="grow"><b>${esc(a.name)}</b><small>${esc(a.kind)}</small></span><span class="amt">${peso(a.balance)}</span></div>`).join('')}</div><div class="between" style="margin-top:10px"><span class="mu small">Total balance</span><b>${peso(d.total_balance)}</b></div></div>` : ''}
+  ${d.accounts.length ? `<div class="card" ${o(3)}>${cardH('Wallets', '<button class="link" data-tab="plan" data-plan="accounts">Manage</button>')}<div class="list">${d.accounts.map(a => `<div class="item"><span class="ico">${I.brief}</span><span class="grow"><b>${esc(a.name)}</b><small>${esc(a.kind)}</small></span><span class="end"><span class="amt">${peso(a.balance)}</span>${manageFinances() && d.accounts.length > 1 ? `<button class="iconbtn sm" data-act="transfer" data-id="${a.id}" title="Transfer from ${esc(a.name)}" aria-label="Transfer from ${esc(a.name)}">${I.refresh}</button>` : ''}</span></div>`).join('')}</div><div class="between" style="margin-top:10px"><span class="mu small">Total balance</span><b>${peso(d.total_balance)}</b></div></div>` : ''}
   <div class="card" ${o(5)}>${cardH('Recent activity', '<button class="link" data-tab="tx">See all</button>')}${d.recent.length ? `<div class="list">${d.recent.map(txRow).join('')}</div>` : empty('🧾', 'No transactions yet', 'Log your first income or expense to get started.', `<button class="btn sm" data-go="addtx" data-k="expense">${I.plus}Add transaction</button>`)}</div>
   <div class="card" ${o(6)}>${cardH('Cash flow', '<button class="link" data-tab="reports">Reports</button>')}${flowChart(d.months)}</div>
   </div><div class="col">
@@ -260,7 +261,7 @@ P.bills = async () => {
 P.goals = async () => {
   const g = S.goals = await api('goals'), add = manageFinances() ? `<button class="btn ${g.length ? 'ghost' : ''}" data-go="addgoal">${I.plus}Create a goal</button>` : '';
   if (!g.length) return `<div class="card">${empty('🎯', 'Start a savings goal', 'Emergency fund, tuition, a family trip: save for it together and watch the progress.', add)}</div>`;
-  return g.map(x => { const p = Math.min(100, Math.round(x.saved * 100 / x.target)); return `<div class="card goal"><span class="ring" style="--p:${p}"><span>${p}%</span></span><span class="grow"><b>${esc(x.name)}</b><small>${peso(x.saved)} of ${peso(x.target)}</small><small>${p >= 100 ? '🎉 Goal reached!' : `${peso(x.target - x.saved)} to go`}</small></span><button class="btn sm soft" data-act="fund" data-id="${x.id}">${I.plus}Add</button></div>`; }).join('') + add;
+  return g.map(x => { const p = Math.min(100, Math.round(x.saved * 100 / x.target)); return `<div class="card goal"><span class="ring" style="--p:${p}"><span>${p}%</span></span><span class="grow"><b>${esc(x.name)}</b><small>${peso(x.saved)} of ${peso(x.target)}</small><small>${p >= 100 ? '🎉 Goal reached!' : `${peso(x.target - x.saved)} to go`} · ${x.contributions || 0} contribution${x.contributions === 1 ? '' : 's'}</small></span><span class="row-acts"><button class="iconbtn sm" data-act="goalhistory" data-id="${x.id}" aria-label="Contribution history for ${esc(x.name)}">${I.list}</button><button class="btn sm soft" data-act="fund" data-id="${x.id}">${I.plus}Add</button></span></div>`; }).join('') + add;
 };
 P.accounts = async () => {
   const [a, recentTransfers] = await Promise.all([api('accounts'), api('transfers')]);
@@ -271,15 +272,17 @@ P.accounts = async () => {
   if (!a.length) return `<div class="card">${empty('👛', 'No wallets yet', 'Add cash, bank, or e-wallet accounts so every transaction has a source.', add)}</div>`;
   const history = recentTransfers.length ? `<div class="card">${cardH('Recent transfers')}<div class="list">${recentTransfers.slice(0, 5).map(x => `<div class="item"><span class="ico">${I.refresh}</span><span class="grow"><b>${esc(x.from)} → ${esc(x.to)}</b><small>${lbl(x.date)}${x.note ? ` · ${esc(x.note)}` : ''}</small></span><span class="amt">${peso(x.amount)}</span></div>`).join('')}</div></div>` : '';
   return `<div class="card stack"><div class="between"><span><small class="mu">Total across wallets</small><h2>${peso(total)}</h2></span><span class="mu small">${a.length} wallet${a.length === 1 ? '' : 's'}</span></div></div>
-    <div class="card list">${a.map(x => `<div class="item"><span class="ico">${I.brief}</span><span class="grow"><b>${esc(x.name)}</b><small>${esc(x.kind)} · opening ${peso(x.opening_balance)}</small></span><span class="end"><span class="amt">${peso(x.balance)}</span>${manageFinances() ? `<span class="row-acts"><button class="iconbtn sm" data-act="account" data-id="${x.id}" aria-label="Edit ${esc(x.name)}">${I.edit}</button><button class="iconbtn sm" data-act="delaccount" data-id="${x.id}" aria-label="Delete ${esc(x.name)}">${I.x}</button></span>` : ''}</span></div>`).join('')}</div>
+    <div class="card list">${a.map(x => `<div class="item"><span class="ico">${I.brief}</span><span class="grow"><b>${esc(x.name)}</b><small>${esc(x.kind)} · opening ${peso(x.opening_balance)}</small></span><span class="end"><span class="amt">${peso(x.balance)}</span>${manageFinances() ? `<span class="row-acts">${a.length > 1 ? `<button class="iconbtn sm" data-act="transfer" data-id="${x.id}" title="Transfer from ${esc(x.name)}" aria-label="Transfer from ${esc(x.name)}">${I.refresh}</button>` : ''}<button class="iconbtn sm" data-act="account" data-id="${x.id}" aria-label="Edit ${esc(x.name)}">${I.edit}</button><button class="iconbtn sm" data-act="delaccount" data-id="${x.id}" aria-label="Delete ${esc(x.name)}">${I.x}</button></span>` : ''}</span></div>`).join('')}</div>
     ${history}${manageFinances() ? `<div class="stack">${transfer}${add}</div>` : '<p class="note center">Only a Parent or family owner can add or transfer wallets.</p>'}`;
 };
 
 const ACCOUNT_KINDS = ['Cash', 'Bank', 'E-wallet', 'Credit', 'Other'];
 const accountForm = a => `<form data-f="saveaccount" class="stack">${a.id ? `<input type="hidden" name="id" value="${a.id}">` : ''}${field('Wallet name', `<input name="name" maxlength="120" placeholder="e.g. GCash, BPI savings, Cash" value="${esc(a.name || '')}" required>`)}${field('Type', `<select name="kind">${ACCOUNT_KINDS.map(k => `<option ${k === (a.kind || 'Cash') ? 'selected' : ''}>${k}</option>`).join('')}</select>`)}${field('Opening balance', `<input name="opening_balance" type="number" inputmode="decimal" step="0.01" min="0" value="${a.opening_balance ?? 0}" required>`, 'Use 0 if you are starting from an empty wallet.')}<button class="btn lg">${a.id ? 'Save changes' : 'Add wallet'}</button></form>`;
-const transferForm = () => {
-  const options = S.accounts.map(a => `<option value="${a.id}">${esc(a.name)} · ${peso(a.balance)}</option>`).join('');
-  return `<form data-f="transfer" class="stack"><div class="two">${field('From', `<select name="from_account_id" required>${options}</select>`)}${field('To', `<select name="to_account_id" required>${options}</select>`)}</div>${field('Amount', money('amount', ''))}<div class="two">${field('Date', `<input name="date" type="date" value="${today()}" required>`)}${field('Note', '<input name="note" maxlength="200" placeholder="Optional">')}</div><p class="note">Transfers move money between wallets without counting as income or spending.</p><button class="btn lg">Transfer</button></form>`;
+const transferForm = fromId => {
+  const from = S.accounts.find(a => String(a.id) === String(fromId)) || S.accounts[0];
+  const to = S.accounts.find(a => a.id !== from?.id);
+  const options = (selected) => S.accounts.map(a => `<option value="${a.id}" ${a.id === selected ? 'selected' : ''}>${esc(a.name)} · ${peso(a.balance)}</option>`).join('');
+  return `<form data-f="transfer" class="stack"><div class="two">${field('From', `<select name="from_account_id" required>${options(from?.id)}</select>`)}${field('To', `<select name="to_account_id" required>${options(to?.id)}</select>`)}</div>${field('Amount', money('amount', ''))}<div class="two">${field('Date', `<input name="date" type="date" value="${today()}" required>`)}${field('Note', '<input name="note" maxlength="200" placeholder="Optional">')}</div><p class="note">Transfers move money between wallets without counting as income or spending.</p><button class="btn lg">Transfer</button></form>`;
 };
 const billForm = b => `<form data-f="savebill" class="stack">${b.id ? `<input type="hidden" name="id" value="${b.id}">` : ''}${field('Bill name', `<input name="name" maxlength="120" placeholder="e.g. Meralco, PLDT, Rent" value="${esc(b.name || '')}" required>`)}<div class="two">${field('Amount', money('amount', b.amount ?? ''))}${field('Due date', `<input name="due" type="date" value="${b.due || today()}" required>`)}</div><p class="note">Marking a bill as paid records it as a <b>Bills</b> expense automatically.</p><button class="btn lg">${b.id ? 'Save changes' : 'Add bill'}</button>${b.id ? `<button type="button" class="btn text-danger" data-act="delbill" data-id="${b.id}">${I.trash}Delete bill</button>` : ''}</form>`;
 V.addbill = async () => ({ title: 'Add a bill', back: 1, narrow: 1, html: billForm({}) });
@@ -429,7 +432,7 @@ const F = {
   async savebudget({ id, ...d }) { await api(id ? `budgets/${id}` : 'budgets', id ? 'PUT' : 'POST', d); closeSheet(); toast('Budget saved'); render(); },
   async saveaccount({ id, ...d }) { await api(id ? `accounts/${id}` : 'accounts', id ? 'PUT' : 'POST', d); closeSheet(); await loadAccounts(); toast(id ? 'Wallet updated' : 'Wallet added'); render(); },
   async transfer(d) { if (d.from_account_id === d.to_account_id) throw new Error('Choose two different wallets'); await api('transfers', 'POST', d); closeSheet(); await loadAccounts(); toast('Transfer recorded'); render(); },
-  async fund(d) { const g = S.goals.find(x => x.id == d.id); await api(`goals/${d.id}/add`, 'POST', { amount: d.amount }); closeSheet(); toast(`Added ${peso(d.amount)} to ${g?.name || 'goal'}`); render(); },
+  async fund(d) { const g = S.goals.find(x => x.id == d.id); await api(`goals/${d.id}/add`, 'POST', { amount: d.amount, note: d.note || '' }); closeSheet(); toast(`Added ${peso(d.amount)} to ${g?.name || 'goal'}`); render(); },
   async profile(d) {
     const b = { name: d.name, email: d.email };
     if (d.current_password) b.current_password = d.current_password;
@@ -466,9 +469,10 @@ const A = {
     toast('Wallet deleted');
     render();
   },
-  transfer() {
+  transfer(id) {
     if (S.accounts.length < 2) return toast('Add at least two wallets first', 1);
-    sheet(`<h3>Transfer between wallets</h3>${transferForm()}`);
+    const from = S.accounts.find(a => String(a.id) === String(id));
+    sheet(`<h3>${from ? `Transfer from ${esc(from.name)}` : 'Transfer between wallets'}</h3>${transferForm(id)}`);
   },
   budget(id) {
     const x = S.budgets.find(b => b.id == id) || {}, cats = [...CATS.expense];
@@ -477,8 +481,14 @@ const A = {
   },
   async delbudget(id) { if (!await ask('Remove this budget?', 'Your transactions stay; only the monthly limit is removed.', 'Remove', 1)) return; await api(`budgets/${id}`, 'DELETE'); toast('Budget removed'); render(); },
   fund(id) {
-    const g = S.goals.find(x => x.id == id);
-    sheet(`<h3>Add to ${esc(g.name)}</h3><p class="mu">${peso(g.saved)} saved of ${peso(g.target)}</p><form data-f="fund" class="stack"><input type="hidden" name="id" value="${id}"><label class="amount"><span>₱</span><input name="amount" type="number" inputmode="decimal" step="0.01" min="0.01" placeholder="0" aria-label="Amount" required></label><div class="chips">${[100, 500, 1000, 5000].map(v => `<button type="button" class="chip" data-act="quick" data-id="${v}">+${peso(v)}</button>`).join('')}</div><div class="actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn">Add savings</button></div></form>`);
+    const g = S.goals.find(x => x.id == id), remaining = Math.max(0, g.remaining ?? g.target - g.saved);
+    if (!remaining) return toast('This savings goal is already complete', 1);
+    sheet(`<h3>Add to ${esc(g.name)}</h3><p class="mu">${peso(g.saved)} saved of ${peso(g.target)} · ${peso(remaining)} remaining</p><form data-f="fund" class="stack"><input type="hidden" name="id" value="${id}"><label class="amount"><span>₱</span><input name="amount" type="number" inputmode="decimal" step="0.01" min="0.01" max="${remaining}" placeholder="0" aria-label="Amount" required></label><div class="chips">${[100, 500, 1000, 5000].filter(v => v <= remaining).map(v => `<button type="button" class="chip" data-act="quick" data-id="${v}">+${peso(v)}</button>`).join('')}</div>${field('Note', '<input name="note" maxlength="200" placeholder="Optional">')}<div class="actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn">Add savings</button></div></form>`);
+  },
+  async goalhistory(id) {
+    const g = await api(`goals/${id}`);
+    const rows = g.contributions.length ? g.contributions.map(c => `<div class="item"><span class="ico">${I.target}</span><span class="grow"><b>${esc(c.member)}</b><small>${lbl(c.date)}${c.note ? ` · ${esc(c.note)}` : ''}</small></span><span class="amt">${peso(c.amount)}</span></div>`).join('') : empty('🎯', 'No contributions yet', 'Contributions will appear here as family members add to this goal.');
+    sheet(`<h3>${esc(g.name)}</h3><p class="mu">${peso(g.saved)} saved of ${peso(g.target)} · ${peso(g.remaining)} remaining</p><div class="card list">${rows}</div><button class="btn ghost" data-close>Close</button>`);
   },
   quick(v, el) { const i = el.closest('form').amount; i.value = (+i.value || 0) + +v; },
   async removemember(id) { const m = S.me.family.members.find(x => x.id == id); if (!await ask(`Remove ${esc(m.name)}?`, 'They will lose access to your family. Their past transactions stay in your history.', 'Remove', 1)) return; await api(`family/members/${id}`, 'DELETE'); await loadMe(); toast(`${m.name} was removed`); render(); },
