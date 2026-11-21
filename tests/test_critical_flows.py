@@ -427,6 +427,36 @@ class CriticalFlowTests(unittest.TestCase):
             "kind": "expense", "amount": 5, "category": "Food", "account_id": other_account_id,
         }).status_code, 400)
 
+    def test_savings_contributions_record_history_and_stop_at_target(self):
+        self.assertEqual(self.client.post("/api/goals", headers=self.owner_headers, json={
+            "name": "Emergency fund", "target": 100,
+        }).status_code, 200)
+        goal_id = self.client.get("/api/goals", headers=self.owner_headers).json[0]["id"]
+        invite = self.client.post("/api/invite", headers=self.owner_headers,
+                                  json={"email": "saver@example.com"}).json["invitation"]
+        signup = self.client.post("/api/signup", json={
+            "name": "Saver", "email": "saver@example.com", "password": "password123",
+            "invite_token": invite["link"].split("invite=", 1)[1],
+        })
+        member_headers = {"Authorization": f"Bearer {signup.json['token']}"}
+        added = self.client.post(f"/api/goals/{goal_id}/add", headers=member_headers,
+                                 json={"amount": 60, "note": "Payday"})
+        self.assertEqual(added.status_code, 200)
+        detail = self.client.get(f"/api/goals/{goal_id}", headers=member_headers).json
+        self.assertEqual(detail["saved"], 60)
+        self.assertEqual(detail["remaining"], 40)
+        self.assertEqual(detail["contributions"][0]["member"], "Saver")
+        self.assertEqual(detail["contributions"][0]["note"], "Payday")
+        self.assertEqual(self.client.post(f"/api/goals/{goal_id}/add", headers=member_headers,
+            json={"amount": 50}).status_code, 409)
+        self.assertEqual(self.client.post(f"/api/goals/{goal_id}/add", headers=member_headers,
+            json={"amount": 40}).status_code, 200)
+        self.assertEqual(self.client.post(f"/api/goals/{goal_id}/add", headers=member_headers,
+            json={"amount": 1}).status_code, 409)
+        summary = self.client.get("/api/goals", headers=self.owner_headers).json[0]
+        self.assertEqual(summary["contributions"], 2)
+        self.assertEqual(summary["remaining"], 0)
+
     def test_invalid_money_dates_and_repeat_bill_payment_are_rejected(self):
         bad_amount = self.client.post("/api/transactions", headers=self.owner_headers,
                                       json={"amount": "NaN", "kind": "expense"})

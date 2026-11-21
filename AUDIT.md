@@ -43,7 +43,8 @@
 
 - [x] Keep family-scoped reads and writes for existing transactions, bills, goals, and reports.
 - [x] Add transaction editing/deletion, search, category/type/month filters, sorting, and monthly category budgets.
-- [ ] Add debt/tuition ledgers, expense approvals, and goal contribution history (these modules do not exist in the original schema).
+- [ ] Add debt/tuition ledgers (these modules do not exist in the original schema).
+- [x] Add manual savings contribution rules and history.
 - [x] Reject malformed dates/transaction kinds and non-finite amounts; prevent duplicate bill payment transactions.
 
 ### Premium and payments
@@ -72,7 +73,7 @@
 
 ## Database changes
 
-`Invite` gained token digest/nonce, role, inviter, timestamps, and revocation/acceptance fields. The newer data model adds family-shared `Account` rows and `Transfer` rows, plus `Tx.account_id`; startup creates the new tables, adds the transaction column, creates a starter wallet for each existing family, and backfills existing transactions. Existing data is preserved. There is no migration runner in this repository; a formal versioned migration framework should replace startup DDL before multi-instance production deployment.
+`Invite` gained token digest/nonce, role, inviter, timestamps, and revocation/acceptance fields. The newer data model adds family-shared `Account` and `Transfer` rows, `Tx.account_id`, and `GoalContribution` history; startup creates the new tables, adds the transaction column, creates a starter wallet for each existing family, and backfills existing transactions and savings totals. Existing data is preserved. There is no migration runner in this repository; a formal versioned migration framework should replace startup DDL before multi-instance production deployment.
 
 ## Configuration and running
 

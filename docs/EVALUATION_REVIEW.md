@@ -24,7 +24,8 @@ The review was read-only. No application code was changed.
 | Multi-account and wallet management | **Addressed for family-shared wallets** | The `Account` model stores family wallets, type, and opening balance (`app.py:183-203`); `Tx.account_id` links each transaction to a wallet; account APIs and a Wallets tab were added (`app.py:1320-1415`; `public/app.js:265`). |
 | Separate wallet balances and initial balances | **Addressed** | `account_snapshot` calculates opening balance plus approved income, minus approved expenses, plus transfers (`app.py:1256-1273`); the dashboard returns wallet balances and a total (`app.py:1595-1605`); the home screen shows a Wallets card. |
 | Assign expenses to Cash, BPI, GCash, etc. | **Addressed** | The transaction form now has an account selector (`public/app.js:225-235`), and transaction responses include account names (`app.py:1440-1448`). |
-| Savings contribution rules | **Partially addressed** | Goals can be created by the owner/Parent and members can add savings (`app.py:1514-1544`), but there is no contribution history and no rule connecting completed transactions to goals. |
+| Savings contribution rules | **Addressed for manual contributions** | Owner/Parent creates goals; members and owners can add manual contributions with a contributor/date/note history. Contributions stop at the target amount. Transactions do not automatically contribute to goals yet. |
+
 | Owner/Parent vs Member permissions | **Addressed** | `can_manage_finances` allows the owner or a Parent (`app.py:113-115`); bills, budgets, goals, approvals, and wallets use it. Members can still add to goals and log their own transactions. `docs/SETUP.md` now reflects the current roles. |
 | Family-finance positioning | **Partially addressed** | Family membership, roles, invitations, shared bills/budgets/goals, member attribution, expense approvals, and family-shared wallets now exist. Private per-member wallets are not included. |
 | Competitive benchmarking | **No evidence in the repo** | No benchmark notes or comparison document exists under `docs/`. |
@@ -39,7 +40,7 @@ The review was read-only. No application code was changed.
 ## Main conclusions
 
 1. **Family-shared multi-account/wallet tracking is now implemented.** The app has opening balances, transaction-to-wallet assignment, transfers, and wallet balances. Private per-member wallets remain a separate follow-up.
-2. **The savings module still has no contribution rules or history.** It only increments a saved total manually.
+2. **Savings now has manual contribution rules and history.** Each contribution is recorded with its contributor, date, amount, and note, and cannot exceed the remaining target.
 3. **The sticky-control and savings-interaction criticisms are mostly outdated.** The Add Transaction control is persistently visible, and savings contributions use a bottom-sheet flow instead of an unstructured popup.
 4. **The permission criticism is largely outdated in code and documentation.** Parent and owner management rights exist, and `docs/SETUP.md` now describes the current model.
 5. **The paid subscription path is not fully delivered in the UI.** The backend supports PayMongo checkout, but the served upgrade button still calls the demo endpoint.
@@ -47,7 +48,7 @@ The review was read-only. No application code was changed.
 ## Recommended follow-up
 
 - Add private per-member wallets only if the family visibility and owner-access rules are decided explicitly.
-- Add savings contribution history and define whether completed transactions automatically contribute to goals.
+- Decide whether completed income transactions should automatically create savings contributions; the current version is manual-only.
 - Review navigation rendering and API loading behavior, then add a regression test or performance check for the reported lag.
 - Connect the served Premium flow to `/api/subscriptions/checkout`, or remove the demo upgrade path from production.
 - Add evidence for external user testing, reviewer access, and business/market documentation if those tasks have been completed outside the repository.
