@@ -585,6 +585,61 @@ class CriticalFlowTests(unittest.TestCase):
         self.assertEqual(len(rows), 6)
         self.assertEqual([r["wallet"] for r in rows if r["amount"] == 1200], [None])
 
+    def test_cash_and_debit_wallets_cannot_be_overdrawn_but_credit_cards_can(self):
+        def post(path, body):
+            return self.client.post(path, headers=self.owner_headers, json=body)
+
+        cash = post("/api/wallets", {"kind": "cash", "name": "Cash", "opening_balance": 100}).json["id"]
+        credit = post("/api/wallets", {"kind": "card", "card_type": "credit", "name": "Card", "last4": "1111",
+                                       "opening_balance": 0}).json["id"]
+        spend = {"kind": "expense", "category": "Food", "date": date.today().isoformat()}
+        self.assertEqual(post("/api/transactions", {**spend, "amount": 150, "wallet_id": cash}).status_code, 400)
+        self.assertEqual(post("/api/transactions", {**spend, "amount": 100, "wallet_id": cash}).status_code, 200)
+        self.assertEqual(post("/api/transactions", {**spend, "amount": 5000, "wallet_id": credit}).status_code, 200)
+        self.assertEqual(post("/api/transactions", {**spend, "amount": 5000}).status_code, 200)
+        tx = [t for t in self.client.get("/api/transactions", headers=self.owner_headers).json if t["wallet_id"] == cash][0]
+        edit = self.client.put(f"/api/transactions/{tx['id']}", headers=self.owner_headers,
+                               json={**spend, "amount": 90, "wallet_id": cash})
+        self.assertEqual(edit.status_code, 200)
+        edit = self.client.put(f"/api/transactions/{tx['id']}", headers=self.owner_headers,
+                               json={**spend, "amount": 120, "wallet_id": cash})
+        self.assertEqual(edit.status_code, 400)
+
+    def test_paying_a_bill_can_use_a_wallet(self):
+        cash = self.client.post("/api/wallets", headers=self.owner_headers,
+                                json={"kind": "cash", "name": "Cash", "opening_balance": 500}).json["id"]
+        for name, amount in (("Power", 300), ("Rent", 9000)):
+            self.client.post("/api/bills", headers=self.owner_headers, json={"name": name, "amount": amount})
+        bills = {b["name"]: b["id"] for b in self.client.get("/api/bills", headers=self.owner_headers).json}
+        self.assertEqual(self.client.post(f"/api/bills/{bills['Rent']}/pay", headers=self.owner_headers,
+                                          json={"wallet_id": cash}).status_code, 400)
+        self.assertEqual(self.client.post(f"/api/bills/{bills['Power']}/pay", headers=self.owner_headers,
+                                          json={"wallet_id": cash}).status_code, 200)
+        balance = self.client.get("/api/wallets", headers=self.owner_headers).json["wallets"][0]["balance"]
+        self.assertEqual(balance, 200)
+        self.assertEqual(self.client.post(f"/api/bills/{bills['Rent']}/pay", headers=self.owner_headers).status_code, 200)
+
+    def test_goals_can_be_edited_and_deleted_by_managers(self):
+        self.client.post("/api/goals", headers=self.owner_headers, json={"name": "Trip", "target": 1000})
+        goal_id = self.client.get("/api/goals", headers=self.owner_headers).json[0]["id"]
+        self.client.post(f"/api/goals/{goal_id}/add", headers=self.owner_headers, json={"amount": 400})
+        over = self.client.post(f"/api/goals/{goal_id}/add", headers=self.owner_headers, json={"amount": 5000})
+        self.assertIn("₱600.00", over.json["error"])
+        self.assertEqual(self.client.put(f"/api/goals/{goal_id}", headers=self.owner_headers,
+                                         json={"name": "Trip", "target": 300}).status_code, 400)
+        self.assertEqual(self.client.put(f"/api/goals/{goal_id}", headers=self.owner_headers,
+                                         json={"name": "Beach trip", "target": 2000}).status_code, 200)
+        self.assertEqual(self.client.get(f"/api/goals/{goal_id}", headers=self.owner_headers).json["name"], "Beach trip")
+        self.assertEqual(self.client.delete(f"/api/goals/{goal_id}", headers=self.owner_headers).status_code, 200)
+        self.assertEqual(self.client.get("/api/goals", headers=self.owner_headers).json, [])
+
+    def test_unknown_api_routes_return_json_and_responses_carry_security_headers(self):
+        missing = self.client.get("/api/does-not-exist", headers=self.owner_headers)
+        self.assertEqual(missing.status_code, 404)
+        self.assertIn("error", missing.json)
+        self.assertEqual(missing.headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(missing.headers["X-Frame-Options"], "DENY")
+
 class RuntimeConfigTests(unittest.TestCase):
     base_env = {
         "APP_ENV": "production",
