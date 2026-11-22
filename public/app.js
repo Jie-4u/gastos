@@ -1,5 +1,5 @@
 const app = document.getElementById('app');
-const S = { view: 'welcome', me: null, avatar: null, stack: [], k: 'expense', plan: 'budgets', filter: 'all', q: '', rows: [], bills: [], budgets: [], goals: [], id: null, invite: null, inviteInfo: null, reset: null, resetSent: null };
+const S = { view: 'welcome', me: null, avatar: null, stack: [], k: 'expense', plan: 'budgets', filter: 'all', q: '', rows: [], bills: [], budgets: [], goals: [], wallets: null, wd: null, wk: 'cash', w: null, wid: null, id: null, invite: null, inviteInfo: null, reset: null, resetSent: null };
 
 /* ---------- Formatting helpers ---------- */
 const peso = n => { const a = Math.abs(Number(n) || 0); return (n < 0 ? '−' : '') + '₱' + a.toLocaleString('en-PH', { minimumFractionDigits: a % 1 ? 2 : 0, maximumFractionDigits: 2 }); };
@@ -50,6 +50,8 @@ const I = {
   refresh: ic('<path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5"/>'),
   camera: ic('<path d="M3 8a2 2 0 0 1 2-2h2l2-3h6l2 3h2a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="4"/>'),
   mail: ic('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>'),
+  wallet: ic('<path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/>'),
+  card: ic('<rect x="2" y="5" width="20" height="14" rx="3"/><path d="M2 10h20M6 15h4"/>'),
   share: ic('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/>'),
 };
 
@@ -60,8 +62,27 @@ const HUE = { Food: 24, Groceries: 140, Bills: 45, Transport: 210, Tuition: 265,
 const ch = c => HUE[c] ?? hue(c);
 const catIco = c => `<span class="cat" style="--h:${ch(c)}">${EMO[c] || '🏷️'}</span>`;
 
+/* ---------- Wallets (Cash Wallet & Card Wallet) ---------- */
+const wIco = w => w.kind === 'cash' ? '💵' : '💳';
+const isCredit = w => w.kind === 'card' && w.card_type === 'credit';
+const wHue = w => w.kind === 'cash' ? 155 : hue(w.bank || w.name);
+const wSub = w => w.kind === 'cash' ? 'Cash on hand' : `${esc(w.bank || (isCredit(w) ? 'Credit card' : 'Debit card'))} · ${isCredit(w) ? 'Credit' : 'Debit'} •••• ${esc(w.last4)}`;
+// The coloured card face. With link=true it is a button that opens the wallet.
+const wFace = (w, link) => {
+  const credit = isCredit(w), tag = link ? 'button' : 'div', over = !credit && w.balance < 0;
+  const pct = credit && w.credit_limit ? w.owed / w.credit_limit * 100 : 0;
+  return `<${tag} class="wcard" style="--h:${wHue(w)}" ${link ? `data-go="wallet" data-wid="${w.id}"` : ''}>
+    <span class="wtop"><span class="wname">${wIco(w)} ${esc(w.name)}</span>${over ? '<span class="wtag bad">Overdrawn</span>' : `<span class="wtag">${w.kind === 'cash' ? 'Cash' : credit ? 'Credit' : 'Debit'}</span>`}</span>
+    <span><small>${credit ? 'Amount owed' : 'Balance'}</small><span class="wbal">${credit ? peso(w.owed) : peso(w.balance)}</span></span>
+    ${credit && w.credit_limit ? `<span class="wutil">${bar(pct)}<small>${peso(w.available)} available of ${peso(w.credit_limit)}</small></span>` : ''}
+    <span class="wbot"><span>${w.kind === 'card' ? `•••• •••• •••• ${esc(w.last4)}` : 'Cash wallet'}</span><span>${esc(w.bank || '')}</span></span></${tag}>`;
+};
+// Compact row for the Home screen.
+const wRow = w => `<button class="item" data-go="wallet" data-wid="${w.id}"><span class="cat" style="--h:${wHue(w)}">${wIco(w)}</span><span class="grow"><b>${esc(w.name)}</b><small>${wSub(w)}</small></span><span class="amt ${w.balance < 0 ? 'tx-out' : ''}">${peso(w.balance)}</span></button>`;
+const walletChips = (ws, sel) => ws.length ? `<fieldset class="field"><legend>Wallet</legend><div class="chips"><label class="chip"><input type="radio" name="wallet_id" value="" ${sel ? '' : 'checked'}>No wallet</label>${ws.map(w => `<label class="chip"><input type="radio" name="wallet_id" value="${w.id}" ${String(sel) === String(w.id) ? 'checked' : ''}>${wIco(w)} ${esc(w.name)}${w.kind === 'card' ? ` ••${esc(w.last4)}` : ''}</label>`).join('')}</div></fieldset>` : '';
+
 /* ---------- Small components ---------- */
-const logo = '<span class="wordmark">Gastos</span>';
+const logo = '<span class="wordmark"><img src="/logo.svg" alt="" width="38" height="38">Gastos</span>';
 const bar = (p, cls = '', color = '') => `<span class="bar ${cls}"><i style="width:${Math.min(100, Math.max(0, p))}%;${color ? `background:${color}` : ''}"></i></span>`;
 const empty = (art, title, text, cta = '') => `<div class="empty"><div class="art">${art}</div><b>${title}</b><p>${text}</p>${cta}</div>`;
 const cardH = (title, more = '') => `<div class="card-h"><h3>${title}</h3>${more}</div>`;
@@ -105,7 +126,7 @@ async function api(p, m = 'GET', b) {
 
 /* ---------- Shared list rows ---------- */
 const statusBadge = t => t.status === 'pending' ? ' <span class="badge warn">Pending approval</span>' : t.status === 'rejected' ? ' <span class="badge bad">Rejected</span>' : '';
-const txRow = t => { const tag = t.id && t.can_edit ? 'button' : 'div'; return `<${tag} class="item tx ${approved(t) ? 'tx-' + t.kind : 'tx-pending'}" ${tag === 'button' ? `data-go="edittx" data-id="${t.id}"` : ''}>${catIco(t.category)}<span class="grow"><b>${esc(t.note || t.category)}</b><small><span class="cchip" style="--h:${ch(t.category)}">${esc(t.category)}</span> ${esc(t.member)}${t.id ? '' : ` · ${lbl(t.date)}`}${t.has_receipt ? ' · 🧾' : ''}${statusBadge(t)}</small></span><span class="amt ${approved(t) ? t.kind : 'mu'}">${t.kind === 'income' ? '+' : '−'}${peso(t.amount)}</span></${tag}>`; };
+const txRow = t => { const tag = t.id && t.can_edit ? 'button' : 'div'; return `<${tag} class="item tx ${approved(t) ? 'tx-' + t.kind : 'tx-pending'}" ${tag === 'button' ? `data-go="edittx" data-id="${t.id}"` : ''}>${catIco(t.category)}<span class="grow"><b>${esc(t.note || t.category)}</b><small><span class="cchip" style="--h:${ch(t.category)}">${esc(t.category)}</span> ${esc(t.member)}${t.wallet ? ` · ${esc(t.wallet)}` : ''}${t.id ? '' : ` · ${lbl(t.date)}`}${t.has_receipt ? ' · 🧾' : ''}${statusBadge(t)}</small></span><span class="amt ${approved(t) ? t.kind : 'mu'}">${t.kind === 'income' ? '+' : '−'}${peso(t.amount)}</span></${tag}>`; };
 const approvalRow = t => `<div class="item">${catIco(t.category)}<span class="grow"><b>${esc(t.note || t.category)}</b><small>${esc(t.member)} · ${lbl(t.date)}</small></span><span class="end"><span class="amt">−${peso(t.amount)}</span><span class="row-acts">${t.has_receipt ? `<button class="iconbtn sm" data-act="receipt" data-id="${t.id}" aria-label="View receipt">🧾</button>` : ''}<button class="iconbtn sm" data-act="reject" data-id="${t.id}" aria-label="Reject ${esc(t.note || t.category)}">${I.x}</button><button class="btn sm soft" data-act="approve" data-id="${t.id}">${I.check}Approve</button></span></span></div>`;
 const billRow = (b, full) => { const [t, c] = due(b.due); return `<div class="item">${catIco('Bills')}<span class="grow"><b>${esc(b.name)}</b><small><span class="badge ${c}">${t}</span></small></span><span class="end"><span class="amt">${peso(b.amount)}</span>${full && manageFinances() ? `<span class="row-acts"><button class="iconbtn sm" data-go="editbill" data-id="${b.id}" aria-label="Edit ${esc(b.name)}">${I.edit}</button><button class="btn sm soft" data-act="pay" data-id="${b.id}">${I.check}Paid</button></span>` : ''}</span></div>`; };
 const budgetRow = b => {
@@ -125,12 +146,28 @@ const catBreakdown = (totals, total) => {
 const V = {};
 const auth = (title, sub, body) => ({ bare: 1, title, html: `<section class="auth"><div class="auth-top"><button class="link" data-back>Back</button>${logo}</div><h1>${title}</h1><p class="mu">${sub}</p>${body}</section>` });
 
-V.welcome = async () => ({ bare: 1, html: `<section class="welcome"><div class="intro">${logo}
-  <h1>Every peso,<br><em>together.</em></h1>
-  <p class="lead">Gastos is the shared money app for Filipino families: track spending, stay ahead of bills, and save for what matters in one place.</p>
-  <ul class="perks"><li>See where the household budget goes</li><li>Know which bills are due before they're late</li><li>Save toward goals as a family</li></ul>
-  <div class="stack"><button class="btn lg" data-go="signup">Create a free account</button><button class="btn ghost lg" data-go="signin">Sign in</button></div>
-  <p class="note">Free for up to 4 family members.</p></div></section>` });
+V.welcome = async () => ({ bare: 1, html: `<section class="welcome"><div class="welcome-shell"><header class="welcome-head">${logo}<nav class="welcome-nav" aria-label="Main navigation"><button type="button" data-scroll="features">Features</button><button type="button" data-scroll="how-it-works">How it works</button></nav><button class="welcome-nav-cta" data-go="signin">Sign in <span aria-hidden="true">→</span></button></header>
+  <div class="welcome-grid"><div class="intro"><span class="eyebrow"><i></i> MADE FOR FILIPINO FAMILIES</span>
+  <h1>Make room for<br><em>what matters.</em></h1>
+  <p class="lead">A calmer way to handle family money. Keep track of spending, stay ahead of bills, and build savings together.</p>
+  <div class="welcome-actions"><button class="btn lg" data-go="signup">Get started for free <span aria-hidden="true">→</span></button><button class="btn ghost lg" data-go="signin">I already have an account</button></div>
+  <p class="welcome-proof"><span>✓</span> Free to start <span>·</span> Up to 4 family members <span>·</span> Private wallets, shared family view</p></div>
+  <div class="welcome-art" aria-label="Gastos wallet and family spending preview"><div class="art-glow"></div><div class="art-spark spark-one">✦</div><div class="art-spark spark-two">✳</div>
+    <div class="preview-card"><div class="preview-top"><span class="preview-mark">${logo}</span><span class="preview-dots">•••</span></div><small class="preview-label">FAMILY BALANCE</small><strong class="preview-balance">₱24,680<span>.50</span></strong><div class="preview-change"><span>↗</span> Your month, in view</div><div class="preview-rule"></div>
+      <div class="preview-row"><span class="preview-icon mint">↗</span><span><b>Money in</b><small>Payday · Today</small></span><strong class="positive">+₱18,500</strong></div>
+      <div class="preview-row"><span class="preview-icon peach">↘</span><span><b>Groceries</b><small>Logged by Alex · Yesterday</small></span><strong>−₱2,340</strong></div>
+      <div class="preview-goal"><span class="goal-icon">⌂</span><span><small>FAMILY GOAL</small><b>Emergency fund</b></span><span class="goal-percent">68%</span><i><u></u></i></div>
+    </div><div class="float-note"><span class="float-check">✓</span><span><b>Bill reminder</b><small>Electricity · Due in 2 days</small></span></div>
+    <div class="art-caption"><span class="avatar-pile"><i>A</i><i>M</i><i>J</i></span><span>One family. A clearer picture.</span></div>
+  </div></div><footer class="welcome-foot"><span>Simple money habits, built together.</span><span>Gastos <b>•</b> Your family’s money companion</span></footer></div>
+  <div class="site-sections"><section class="site-features" id="features"><div class="section-heading"><span class="eyebrow"><i></i> LESS MONEY STRESS</span><h2>One family view.<br><em>More peace of mind.</em></h2><p>Small money moments are easier when everyone has a clear place to start.</p></div>
+    <div class="feature-grid"><article class="feature-card"><span class="feature-icon green">↗</span><h3>Know where it goes</h3><p>Log income and expenses as they happen. See this month’s flow and recent activity without digging through chats.</p></article>
+      <article class="feature-card"><span class="feature-icon gold">◷</span><h3>Stay ahead of bills</h3><p>Keep due dates in one shared view and mark bills paid when they’re handled. Fewer last-minute surprises.</p></article>
+      <article class="feature-card"><span class="feature-icon lilac">✳</span><h3>Save with a reason</h3><p>Give a family goal a name, set a target, and watch contributions bring it closer—one step at a time.</p></article></div>
+    </section><section class="site-how" id="how-it-works"><div class="how-copy"><span class="eyebrow"><i></i> EASY TO GET GOING</span><h2>Start simple.<br><em>Build together.</em></h2><p>No complicated setup. Create your space and add the pieces that matter to your family.</p><button class="btn" data-go="signup">Create your free account <span aria-hidden="true">→</span></button></div>
+      <ol class="how-steps"><li><span>01</span><div><b>Create your family space</b><p>Choose a family name and invite the people you want to plan with.</p></div></li><li><span>02</span><div><b>Add your own wallets</b><p>Only you see your wallet balances. The family sees the transactions you log, so everyone shares one picture.</p></div></li><li><span>03</span><div><b>Make a plan that sticks</b><p>Keep bills, budgets, and savings goals together in one calm overview.</p></div></li></ol>
+    </section><section class="site-cta"><div><span class="eyebrow">A BETTER MONEY ROUTINE STARTS HERE</span><h2>Make the next peso count.</h2><p>Bring your family’s money picture into focus, one small step at a time.</p></div><button class="btn lg" data-go="signup">Get started for free <span aria-hidden="true">→</span></button></section>
+    <footer class="site-footer">${logo}<span>Made for families, with care. <b>© Gastos</b></span></footer></div></section>` });
 
 V.signup = async () => {
   const inv = S.inviteInfo;
@@ -188,12 +225,14 @@ V.home = async () => {
   const o = n => `style="order:${n}"`, soon = isPrem() ? d.bills.filter(b => days(b.due) <= 3) : [];
   const reminders = soon.length ? `<div class="alert" ${o(0)} role="status"><b>⏰ Bill reminder${soon.length > 1 ? 's' : ''}</b>${soon.map(b => `<span>${esc(b.name)}: ${due(b.due)[0].toLowerCase()} · ${peso(b.amount)}</span>`).join('')}</div>` : '';
   const approvals = d.approvals.length ? `<div class="card" ${o(0)}>${cardH(`Waiting for your approval`, `<span class="badge warn">${d.approvals.length}</span>`)}<div class="list">${d.approvals.map(approvalRow).join('')}</div></div>` : '';
+  const wl = d.wallets || [], walletCard = `<div class="card" ${o(3)}>${cardH('Wallets', wl.length ? '<button class="link" data-go="wallets">See all</button>' : '')}${wl.length ? `<div class="list">${wl.map(wRow).join('')}</div>` : empty('👛', 'Your wallets', 'Add your Cash Wallet or Card Wallet to see where your money sits.', `<span class="row-acts"><button class="btn sm" data-go="addwallet" data-wk="cash">${I.plus}Add cash</button><button class="btn sm ghost" data-go="addwallet" data-wk="card">${I.plus}Add card</button></span>`)}</div>`;
   return { title: `${h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'}, ${esc(first(S.me.name))}`, sub: esc(f.name), nav: 1, right: meBtn(), html: `<div class="grid"><div class="col">${reminders}${approvals}
-  <section class="hero" ${o(1)}><small>${month} balance</small><div class="big">${peso(d.balance)}</div><div class="split"><div class="pill"><i>${I.up}</i><span><small>Income</small><b>${peso(d.income)}</b></span></div><div class="pill"><i>${I.down}</i><span><small>Expenses</small><b>${peso(d.expense)}</b></span></div></div></section>
+  <section class="hero" ${o(1)}><small>${month}: money in minus money out</small><div class="big">${peso(d.balance)}</div><div class="split"><div class="pill"><i>${I.up}</i><span><small>Income</small><b>${peso(d.income)}</b></span></div><div class="pill"><i>${I.down}</i><span><small>Expenses</small><b>${peso(d.expense)}</b></span></div></div></section>
   <div class="quick" ${o(2)}><button data-go="addtx" data-k="income"><i>${I.up}</i>Income</button><button data-go="addtx" data-k="expense"><i class="ex">${I.down}</i>Expense</button>${manageFinances() ? `<button data-go="addbill"><i>${I.receipt}</i>Add bill</button><button data-go="addgoal"><i>${I.target}</i>New goal</button>` : `<button data-tab="plan" data-plan="bills"><i>${I.receipt}</i>Bills</button><button data-tab="plan" data-plan="goals"><i>${I.target}</i>Goals</button>`}</div>
   <div class="card" ${o(5)}>${cardH('Recent activity', '<button class="link" data-tab="tx">See all</button>')}${d.recent.length ? `<div class="list">${d.recent.map(txRow).join('')}</div>` : empty('🧾', 'No transactions yet', 'Log your first income or expense to get started.', `<button class="btn sm" data-go="addtx" data-k="expense">${I.plus}Add transaction</button>`)}</div>
   <div class="card" ${o(6)}>${cardH('Cash flow', '<button class="link" data-tab="reports">Reports</button>')}${flowChart(d.months)}</div>
   </div><div class="col">
+  ${walletCard}
   ${d.bills.length ? `<div class="card" ${o(3)}>${cardH('Upcoming bills', '<button class="link" data-tab="plan" data-plan="bills">See all</button>')}<div class="list">${d.bills.slice(0, 3).map(b => billRow(b)).join('')}</div></div>` : ''}
   ${d.budgets.length ? `<div class="card" ${o(4)}>${cardH(`${month} budgets`, '<button class="link" data-tab="plan" data-plan="budgets">Manage</button>')}<div class="stack">${d.budgets.slice(0, 4).map(budgetRow).join('')}</div></div>` : ''}
   <div class="card" ${o(7)}>${cardH('Spending by category')}${catBreakdown(d.category_totals, d.expense)}</div>
@@ -204,11 +243,11 @@ V.home = async () => {
 
 V.tx = async () => {
   S.rows = await api('transactions');
-  return { title: 'Activity', sub: 'Every family transaction', nav: 1, right: meBtn(), html: `<div class="stack"><label class="field" style="position:relative"><span class="sr" hidden>Search</span><span style="position:absolute;left:14px;top:14px;color:var(--faint)">${I.search}</span><input data-search placeholder="Search notes, categories or members" value="${esc(S.q)}" style="padding-left:44px" aria-label="Search transactions"></label>${seg([['all', 'All'], ['expense', 'Expenses'], ['income', 'Income']], S.filter, k => `data-filter="${k}"`)}</div><div id="txlist" class="stack">${txList()}</div>` };
+  return { title: 'Activity', sub: 'Every family transaction', nav: 1, right: meBtn(), html: `<div class="stack"><label class="field" style="position:relative"><span class="sr" hidden>Search</span><span style="position:absolute;left:14px;top:14px;color:var(--faint)">${I.search}</span><input data-search placeholder="Search notes, categories, members or wallets" value="${esc(S.q)}" style="padding-left:44px" aria-label="Search transactions"></label>${seg([['all', 'All'], ['expense', 'Expenses'], ['income', 'Income']], S.filter, k => `data-filter="${k}"`)}</div><div id="txlist" class="stack">${txList()}</div>` };
 };
 function txList() {
   if (!S.rows.length) return empty('🧾', 'No transactions yet', 'Add your first income or expense to start seeing where your money goes.', `<button class="btn" data-go="addtx" data-k="expense">${I.plus}Add transaction</button>`);
-  const q = S.q.trim().toLowerCase(), rows = S.rows.filter(t => (S.filter === 'all' || t.kind === S.filter) && (!q || [t.note, t.category, t.member].join(' ').toLowerCase().includes(q)));
+  const q = S.q.trim().toLowerCase(), rows = S.rows.filter(t => (S.filter === 'all' || t.kind === S.filter) && (!q || [t.note, t.category, t.member, t.wallet].join(' ').toLowerCase().includes(q)));
   if (!rows.length) return empty('🔍', 'No matches', 'Try a different search or filter.');
   const ok = rows.filter(approved), inc = sum(ok, t => t.kind === 'income' ? t.amount : 0), exp = sum(ok, t => t.kind === 'expense' ? t.amount : 0), groups = {};
   rows.forEach(t => (groups[t.date] ||= []).push(t));
@@ -222,22 +261,56 @@ const receiptBlock = url => url
   ? `<img class="rimg" src="${esc(url)}" alt="Receipt photo"><span class="row-acts"><label class="btn sm ghost">${I.camera}Retake${receiptInput}</label><button type="button" class="btn sm text-danger" data-act="rmreceipt">${I.trash}Remove</button></span>`
   : `<label class="btn ghost">${I.camera}Scan receipt${receiptInput}</label><small class="note">Gastos reads the total and fills in the amount.</small>`;
 const catChips = (k, sel) => { const l = [...CATS[k]]; if (sel && !l.includes(sel)) l.push(sel); sel = sel || l[0]; return l.map(c => `<label class="chip"><input type="radio" name="category" value="${esc(c)}" ${c === sel ? 'checked' : ''}>${EMO[c] || '🏷️'} ${esc(c)}</label>`).join(''); };
-const txForm = t => {
+const txForm = (t, ws = []) => {
   const k = t.kind || S.k;
   return `<form data-f="savetx" class="stack">${t.id ? `<input type="hidden" name="id" value="${t.id}">` : ''}
   <div class="seg">${[['expense', 'Expense'], ['income', 'Income']].map(([v, l]) => `<label><input type="radio" name="kind" value="${v}" ${k === v ? 'checked' : ''}><span>${l}</span></label>`).join('')}</div>
   <label class="amount"><span>₱</span><input name="amount" type="number" inputmode="decimal" step="0.01" min="0.01" placeholder="0" value="${t.amount ?? ''}" aria-label="Amount" required autofocus></label>
   <fieldset class="field"><legend>Category</legend><div class="chips" id="catchips">${catChips(k, t.category)}</div></fieldset>
+  ${t.id && t.mine === false ? '' : walletChips(ws, t.id ? t.wallet_id : S.w)}
   <div class="two">${field('Date', `<input name="date" type="date" value="${t.date || today()}" required>`)}${field('Note', `<input name="note" maxlength="200" placeholder="What was this for?" value="${esc(t.note || '')}">`)}</div>
   ${isPrem() ? `<div class="receipt" id="rcpt">${receiptBlock(t.receipt_data)}</div>` : lock('Scan receipts with Premium', 'Snap a photo and Gastos reads the total')}
   ${t.status === 'pending' ? '<p class="note">This expense is waiting for the family owner\'s approval.</p>' : t.status === 'rejected' ? '<p class="note">The family owner rejected this expense. Edit it to send it for approval again, or delete it.</p>' : ''}
   <button class="btn lg">${t.id ? 'Save changes' : 'Save transaction'}</button>${t.id ? `<button type="button" class="btn text-danger" data-act="deltx" data-id="${t.id}">${I.trash}Delete transaction</button>` : ''}</form>`;
 };
-V.addtx = async () => ({ title: 'New transaction', back: 1, narrow: 1, html: txForm({}) });
-V.edittx = async () => ({ title: 'Edit transaction', back: 1, narrow: 1, html: txForm(await api(`transactions/${S.id}`)) });
+V.addtx = async () => ({ title: 'New transaction', back: 1, narrow: 1, html: txForm({}, (await api('wallets')).wallets) });
+V.edittx = async () => { const [t, w] = await Promise.all([api(`transactions/${S.id}`), api('wallets')]); return { title: 'Edit transaction', back: 1, narrow: 1, html: txForm(t, w.wallets) }; };
+
+/* ---------- Wallets screens ---------- */
+V.wallets = async () => {
+  const { wallets: ws, totals: t } = await api('wallets'), m = true;
+  const cash = ws.filter(w => w.kind === 'cash'), cards = ws.filter(w => w.kind === 'card');
+  const add = (k, text) => m ? `<button class="btn ghost" data-go="addwallet" data-wk="${k}">${I.plus}${text}</button>` : '';
+  if (!ws.length) return { title: 'Wallets', sub: 'Cash & cards', back: 1, narrow: 1, html: `<div class="card">${empty('👛', 'No wallets yet', 'Add your own Cash Wallet for money on hand and a Card Wallet for your debit and credit cards. Pick a wallet when you log a transaction and Gastos keeps each balance up to date. Only you can see your wallets.', m ? `<button class="btn" data-go="addwallet" data-wk="cash">${I.plus}Add a cash wallet</button>` : '')}</div>${m ? `<button class="btn ghost" data-go="addwallet" data-wk="card">${I.plus}Add a card</button>` : ''}` };
+  return { title: 'Wallets', sub: 'Cash & cards', back: 1, narrow: 1, html: `<section class="hero"><small>Available to spend</small><div class="big">${peso(t.available)}</div><div class="split"><div class="pill"><i>${I.wallet}</i><span><small>Cash</small><b>${peso(t.cash)}</b></span></div><div class="pill"><i>${I.card}</i><span><small>Credit owed</small><b>${peso(t.owed)}</b></span></div></div></section>
+  <h3 class="sec">Cash Wallet</h3>${cash.length ? `<div class="stack">${cash.map(w => wFace(w, 1)).join('')}</div>` : '<p class="note">No cash wallet yet.</p>'}${add('cash', 'Add a cash wallet')}
+  <h3 class="sec">Card Wallet</h3>${cards.length ? `<div class="stack">${cards.map(w => wFace(w, 1)).join('')}</div>` : '<p class="note">No cards yet.</p>'}${add('card', 'Add a card')}
+  <p class="note center">Wallets are private to your account.</p>` };
+};
+V.wallet = async () => {
+  const w = S.wd = await api(`wallets/${S.wid}`), m = true, credit = isCredit(w);
+  return { title: esc(w.name), sub: wSub(w), back: 1, narrow: 1, html: `${wFace(w)}
+  <div class="quick"><button data-go="addtx" data-k="income" data-w="${w.id}"><i>${I.up}</i>${credit ? 'Payment' : 'Income'}</button><button data-go="addtx" data-k="expense" data-w="${w.id}"><i class="ex">${I.down}</i>Expense</button>${m ? `<button data-act="walletadjust" data-id="${w.id}"><i>${I.refresh}</i>Adjust</button><button data-go="editwallet" data-wid="${w.id}"><i>${I.edit}</i>Edit</button>` : ''}</div>
+  <div class="stats">${stat('In this month', peso(w.month_income), 'tx-in')}${stat('Out this month', peso(w.month_expense), 'tx-out')}${credit && w.credit_limit ? stat('Credit limit', peso(w.credit_limit)) : ''}</div>
+  <div class="card">${cardH('Activity')}${w.transactions.length ? `<div class="list">${w.transactions.map(txRow).join('')}</div>` : empty('🧾', 'No activity yet', 'Choose this wallet when you log a transaction and it will show up here.')}</div>
+  ${m ? `<button class="btn text-danger" data-act="delwallet" data-id="${w.id}">${I.trash}Delete wallet</button>` : ''}` };
+};
+const walletForm = w => {
+  const kind = w.kind || S.wk, card = kind === 'card', credit = isCredit(w);
+  return `<form data-f="savewallet" class="stack">${w.id ? `<input type="hidden" name="id" value="${w.id}">` : ''}<input type="hidden" name="kind" value="${kind}">
+  ${field(card ? 'Card nickname' : 'Wallet name', `<input name="name" maxlength="80" placeholder="${card ? 'e.g. Payroll card' : 'e.g. Cash on hand'}" value="${esc(w.name || '')}" required>`)}
+  ${card ? `${field('Bank or issuer', `<input name="bank" maxlength="80" placeholder="e.g. BDO, BPI, GCash" value="${esc(w.bank || '')}">`)}
+  ${w.id ? '' : `<fieldset class="field"><legend>Card type</legend><div class="seg">${[['debit', 'Debit'], ['credit', 'Credit']].map(([v, l]) => `<label><input type="radio" name="card_type" value="${v}" ${v === 'debit' ? 'checked' : ''}><span>${l}</span></label>`).join('')}</div></fieldset>`}
+  ${field('Last 4 digits', `<input name="last4" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" placeholder="1234" value="${esc(w.last4 || '')}" required>`, 'Only the last 4 digits. Never enter the full card number, expiry or CVV.')}
+  <div class="only-credit" ${credit ? '' : 'hidden'}>${field('Credit limit', `<input name="credit_limit" type="number" inputmode="decimal" step="0.01" min="0.01" placeholder="₱ 0.00" value="${w.credit_limit ?? ''}">`, 'Optional. Lets Gastos show your available credit.')}</div>` : ''}
+  ${w.id ? '<p class="note">To correct the balance, open the wallet and tap Adjust.</p>' : `<label class="field"><span id="ballbl">${card ? 'Current balance' : 'Cash on hand now'}</span><input name="opening_balance" type="number" inputmode="decimal" step="0.01" min="0" placeholder="₱ 0.00" value="0"><small>Where this wallet starts today. Transactions you link to it change it from here.</small></label>`}
+  <button class="btn lg">${w.id ? 'Save changes' : card ? 'Add card' : 'Add wallet'}</button></form>`;
+};
+V.addwallet = async () => ({ title: S.wk === 'card' ? 'Add a card' : 'Add a cash wallet', back: 1, narrow: 1, html: walletForm({}) });
+V.editwallet = async () => ({ title: 'Edit wallet', back: 1, narrow: 1, html: walletForm(await api(`wallets/${S.wid}`)) });
 
 const P = {};
-V.plan = async () => ({ title: 'Plan', sub: 'Budgets, bills & savings goals', nav: 1, right: meBtn(), html: seg([['budgets', 'Budgets'], ['bills', 'Bills'], ['goals', 'Goals']], S.plan, k => `data-tab="plan" data-plan="${k}"`) + await P[S.plan]() });
+V.plan = async () => ({ title: 'Plan', sub: 'Wallets, bills, budgets & goals', nav: 1, right: meBtn(), html: seg([['budgets', 'Budgets'], ['bills', 'Bills'], ['goals', 'Goals']], S.plan, k => `data-tab="plan" data-plan="${k}"`) + await P[S.plan]() });
 P.budgets = async () => {
   const b = S.budgets = await api('budgets'), full = !isPrem() && b.length >= 3;
   const add = !manageFinances() ? '' : full ? lock('Unlimited budgets with Premium', 'The Free plan includes 3 budgets') : `<button class="btn ${b.length ? 'ghost' : ''}" data-act="budget">${I.plus}Set a budget</button>`;
@@ -255,9 +328,8 @@ P.bills = async () => {
 P.goals = async () => {
   const g = S.goals = await api('goals'), add = manageFinances() ? `<button class="btn ${g.length ? 'ghost' : ''}" data-go="addgoal">${I.plus}Create a goal</button>` : '';
   if (!g.length) return `<div class="card">${empty('🎯', 'Start a savings goal', 'Emergency fund, tuition, a family trip: save for it together and watch the progress.', add)}</div>`;
-  return g.map(x => { const p = Math.min(100, Math.round(x.saved * 100 / x.target)); return `<div class="card goal"><span class="ring" style="--p:${p}"><span>${p}%</span></span><span class="grow"><b>${esc(x.name)}</b><small>${peso(x.saved)} of ${peso(x.target)}</small><small>${p >= 100 ? '🎉 Goal reached!' : `${peso(x.target - x.saved)} to go`}</small></span><button class="btn sm soft" data-act="fund" data-id="${x.id}">${I.plus}Add</button></div>`; }).join('') + add;
+  return g.map(x => { const p = Math.min(100, Math.round(x.saved * 100 / x.target)); return `<div class="card goal"><span class="ring" style="--p:${p}"><span>${p}%</span></span><span class="grow"><b>${esc(x.name)}</b><small>${peso(x.saved)} of ${peso(x.target)}</small><small>${p >= 100 ? '🎉 Goal reached!' : `${peso(x.target - x.saved)} to go`} · ${x.contributions || 0} contribution${x.contributions === 1 ? '' : 's'}</small></span><span class="row-acts">${manageFinances() ? `<button class="iconbtn sm" data-act="editgoal" data-id="${x.id}" aria-label="Edit ${esc(x.name)}">${I.edit}</button>` : ''}<button class="iconbtn sm" data-act="goalhistory" data-id="${x.id}" aria-label="Contribution history for ${esc(x.name)}">${I.list}</button><button class="btn sm soft" data-act="fund" data-id="${x.id}">${I.plus}Add</button></span></div>`; }).join('') + add;
 };
-
 const billForm = b => `<form data-f="savebill" class="stack">${b.id ? `<input type="hidden" name="id" value="${b.id}">` : ''}${field('Bill name', `<input name="name" maxlength="120" placeholder="e.g. Meralco, PLDT, Rent" value="${esc(b.name || '')}" required>`)}<div class="two">${field('Amount', money('amount', b.amount ?? ''))}${field('Due date', `<input name="due" type="date" value="${b.due || today()}" required>`)}</div><p class="note">Marking a bill as paid records it as a <b>Bills</b> expense automatically.</p><button class="btn lg">${b.id ? 'Save changes' : 'Add bill'}</button>${b.id ? `<button type="button" class="btn text-danger" data-act="delbill" data-id="${b.id}">${I.trash}Delete bill</button>` : ''}</form>`;
 V.addbill = async () => ({ title: 'Add a bill', back: 1, narrow: 1, html: billForm({}) });
 V.editbill = async () => ({ title: 'Edit bill', back: 1, narrow: 1, html: billForm(await api(`bills/${S.id}`)) });
@@ -293,12 +365,12 @@ const advanced = (a, now) => {
 const menu = (go, icon, title, sub = '') => `<button class="item" data-go="${go}"><span class="ico">${icon}</span><span class="grow"><b>${title}</b>${sub ? `<small>${sub}</small>` : ''}</span>${I.next}</button>`;
 V.profile = async () => {
   const f = S.me.family;
-  return { title: 'Profile', back: 1, narrow: 1, html: `<div class="card profile-head"><label class="avatar-edit" title="Change photo">${av(S.me.name, S.avatar, 'lg')}<span class="cam">${I.camera}</span><input type="file" accept="image/jpeg,image/png,image/webp" class="vh" data-avatar aria-label="Change profile photo"></label><span class="grow"><b style="font-size:18px">${esc(S.me.name)}</b><small>${esc(S.me.email)}</small>${f ? `<small>${esc(f.name)} · ${f.owner ? 'Owner' : esc(f.role)}</small>` : ''}${S.avatar ? '<button class="link" style="align-self:flex-start;margin-top:4px" data-act="rmavatar">Remove photo</button>' : ''}</span></div>
+  return { title: 'Profile', back: 1, html: `<div class="profile-layout"><div class="profile-main"><div class="card profile-head"><label class="avatar-edit" title="Change photo">${av(S.me.name, S.avatar, 'lg')}<span class="cam">${I.camera}</span><input type="file" accept="image/jpeg,image/png,image/webp" class="vh" data-avatar aria-label="Change profile photo"></label><span class="grow"><b style="font-size:18px">${esc(S.me.name)}</b><small>${esc(S.me.email)}</small>${f ? `<small>${esc(f.name)} · ${f.owner ? 'Owner' : esc(f.role)}</small>` : ''}${S.avatar ? '<button class="link" style="align-self:flex-start;margin-top:4px" data-act="rmavatar">Remove photo</button>' : ''}</span></div>
   <form data-f="profile" class="card stack"><h3>Personal details</h3>${field('Full name', `<input name="name" maxlength="120" value="${esc(S.me.name)}" required>`)}${field('Email', `<input name="email" type="email" value="${esc(S.me.email)}" required>`, 'Changing your email requires your current password below.')}
   <details class="pwbox"><summary>Password &amp; security</summary><div class="stack">${field('Current password', pw('current_password', 'Your current password', 'autocomplete="current-password"'))}${field('New password', pw('new_password', 'Leave blank to keep it', 'minlength="8" autocomplete="new-password"'))}</div></details>
-  <button class="btn">Save changes</button></form>
-  <div class="card list">${f ? menu('premium', I.crown, 'Gastos Premium', f.plan === 'premium' ? 'Your family is on Premium' : `Free plan · up to ${f.limit} members`) : ''}${menu('reports', I.chart, 'Reports & export')}${menu('partners', I.brief, 'Partner services')}</div>
-  <button class="btn ghost" data-act="signout">${I.logout}Sign out</button>` };
+  <button class="btn">Save changes</button></form></div>
+  <aside class="profile-side"><div class="card list">${f ? menu('premium', I.crown, 'Gastos Premium', f.plan === 'premium' ? 'Your family is on Premium' : `Free plan · up to ${f.limit} members`) : ''}${menu('wallets', I.wallet, 'Wallets', 'Cash & cards')}${menu('reports', I.chart, 'Reports & export')}${menu('partners', I.brief, 'Partner services')}</div>
+  <button class="btn ghost" data-act="signout">${I.logout}Sign out</button></aside></div>` };
 };
 
 const FEATS = ['Up to 10 family members', 'Unlimited budgets', 'Expense approval: you approve members\' expenses', 'Bill reminders on your Home screen', 'Advanced analytics in Reports', 'Receipt scanning that reads the total', 'CSV export of all transactions'];
@@ -402,8 +474,12 @@ const F = {
   async upgrade(d) { await api('upgrade', 'POST', d); closeSheet(); await loadMe(); toast('Welcome to Premium! 🎉'); render(); },
   async savebill({ id, ...d }) { await api(id ? `bills/${id}` : 'bills', id ? 'PUT' : 'POST', d); toast(id ? 'Bill updated' : 'Bill added'); S.plan = 'bills'; back(); },
   async addgoal(d) { await api('goals', 'POST', d); toast('Goal created'); S.plan = 'goals'; back(); },
+  async savegoal({ id, ...d }) { await api(`goals/${id}`, 'PUT', d); closeSheet(); toast('Goal updated'); render(); },
+  async paybill({ id, wallet_id }) { await api(`bills/${id}/pay`, 'POST', { wallet_id }); closeSheet(); toast('Bill marked as paid'); render(); },
+  async savewallet({ id, ...d }) { await api(id ? `wallets/${id}` : 'wallets', id ? 'PUT' : 'POST', d); toast(id ? 'Wallet updated' : 'Wallet added'); back(); },
+  async walletadjust(d) { await api(`wallets/${d.id}/adjust`, 'POST', { amount: d.amount }); closeSheet(); toast('Balance updated'); render(); },
   async savebudget({ id, ...d }) { await api(id ? `budgets/${id}` : 'budgets', id ? 'PUT' : 'POST', d); closeSheet(); toast('Budget saved'); render(); },
-  async fund(d) { const g = S.goals.find(x => x.id == d.id); await api(`goals/${d.id}/add`, 'POST', { amount: d.amount }); closeSheet(); toast(`Added ${peso(d.amount)} to ${g?.name || 'goal'}`); render(); },
+  async fund(d) { const g = S.goals.find(x => x.id == d.id); await api(`goals/${d.id}/add`, 'POST', { amount: d.amount, note: d.note || '' }); closeSheet(); toast(`Added ${peso(d.amount)} to ${g?.name || 'goal'}`); render(); },
   async profile(d) {
     const b = { name: d.name, email: d.email };
     if (d.current_password) b.current_password = d.current_password;
@@ -422,10 +498,14 @@ const A = {
   peek(_, el) { const i = el.previousElementSibling, show = i.type === 'password'; i.type = show ? 'text' : 'password'; el.textContent = show ? 'Hide' : 'Show'; el.setAttribute('aria-label', show ? 'Hide password' : 'Show password'); },
   async accept() { await api(`invitations/${encodeURIComponent(S.invite)}/accept`, 'POST'); toast(`Welcome to ${S.inviteInfo.family}!`); S.invite = S.inviteInfo = null; await enter(); },
   async pay(id) {
-    const b = S.bills.find(x => x.id == id);
-    if (!await ask(`Mark ${esc(b?.name || 'bill')} as paid?`, `This records ${peso(b?.amount)} as a Bills expense dated today.`, 'Mark as paid')) return;
-    await api(`bills/${id}/pay`, 'POST'); toast('Bill marked as paid'); render();
+    const b = S.bills.find(x => x.id == id), ws = (await api('wallets')).wallets;
+    sheet(`<h3>Mark ${esc(b?.name || 'bill')} as paid?</h3><p class="mu">This records ${peso(b?.amount)} as a Bills expense dated today.</p><form data-f="paybill" class="stack"><input type="hidden" name="id" value="${id}">${walletChips(ws)}<div class="actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn">Mark as paid</button></div></form>`);
   },
+  async editgoal(id) {
+    const g = S.goals.find(x => x.id == id);
+    sheet(`<h3>Edit goal</h3><form data-f="savegoal" class="stack"><input type="hidden" name="id" value="${id}">${field('Goal name', `<input name="name" maxlength="120" value="${esc(g.name)}" required>`)}${field('Target amount', money('target', g.target), `At least ${peso(g.saved)}, the amount already saved.`)}<div class="actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn">Save goal</button></div><button type="button" class="btn text-danger" data-act="delgoal" data-id="${id}">${I.trash}Delete goal</button></form>`);
+  },
+  async delgoal(id) { if (!await ask('Delete this goal?', 'Its contribution history is deleted too. This can\'t be undone.', 'Delete', 1)) return; await api(`goals/${id}`, 'DELETE'); toast('Goal deleted'); render(); },
   async delbill(id) { if (!await ask('Delete this bill?', 'It will be removed from your family\'s reminders.', 'Delete', 1)) return; await api(`bills/${id}`, 'DELETE'); toast('Bill deleted'); back(); },
   async deltx(id) { if (!await ask('Delete this transaction?', 'This can\'t be undone and will update your family\'s totals.', 'Delete', 1)) return; await api(`transactions/${id}`, 'DELETE'); toast('Transaction deleted'); back(); },
   budget(id) {
@@ -433,10 +513,21 @@ const A = {
     if (x.category && !cats.includes(x.category)) cats.push(x.category);
     sheet(`<h3>${x.id ? 'Edit budget' : 'Set a monthly budget'}</h3><form data-f="savebudget" class="stack">${x.id ? `<input type="hidden" name="id" value="${x.id}">` : ''}${field('Category', `<select name="category">${cats.map(c => `<option value="${esc(c)}" ${c === x.category ? 'selected' : ''}>${EMO[c] || '🏷️'} ${esc(c)}</option>`).join('')}</select>`)}${field('Monthly limit', money('monthly_limit', x.monthly_limit ?? ''))}<div class="actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn">Save budget</button></div>${x.id ? `<button type="button" class="btn text-danger" data-act="delbudget" data-id="${x.id}">${I.trash}Remove budget</button>` : ''}</form>`);
   },
+  walletadjust(id) {
+    const w = S.wd, credit = isCredit(w), cur = Math.max(0, credit ? w.owed : w.balance);
+    sheet(`<h3>${credit ? 'Update amount owed' : 'Adjust balance'}</h3><p class="mu">${credit ? `Gastos shows ${peso(w.owed)} owed on ${esc(w.name)}. Enter what your statement says now.` : `Gastos shows ${peso(w.balance)} in ${esc(w.name)}. Enter what you actually have now.`} This corrects the balance without adding a transaction.</p><form data-f="walletadjust" class="stack"><input type="hidden" name="id" value="${id}"><label class="amount"><span>₱</span><input name="amount" type="number" inputmode="decimal" step="0.01" min="0" placeholder="0" value="${cur}" aria-label="New amount" required></label><div class="actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn">Save</button></div></form>`);
+  },
+  async delwallet(id) { if (!await ask('Delete this wallet?', 'Its transactions stay in your history, but they will no longer be linked to a wallet.', 'Delete', 1)) return; await api(`wallets/${id}`, 'DELETE'); toast('Wallet deleted'); back(); },
   async delbudget(id) { if (!await ask('Remove this budget?', 'Your transactions stay; only the monthly limit is removed.', 'Remove', 1)) return; await api(`budgets/${id}`, 'DELETE'); toast('Budget removed'); render(); },
   fund(id) {
-    const g = S.goals.find(x => x.id == id);
-    sheet(`<h3>Add to ${esc(g.name)}</h3><p class="mu">${peso(g.saved)} saved of ${peso(g.target)}</p><form data-f="fund" class="stack"><input type="hidden" name="id" value="${id}"><label class="amount"><span>₱</span><input name="amount" type="number" inputmode="decimal" step="0.01" min="0.01" placeholder="0" aria-label="Amount" required></label><div class="chips">${[100, 500, 1000, 5000].map(v => `<button type="button" class="chip" data-act="quick" data-id="${v}">+${peso(v)}</button>`).join('')}</div><div class="actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn">Add savings</button></div></form>`);
+    const g = S.goals.find(x => x.id == id), remaining = Math.max(0, g.remaining ?? g.target - g.saved);
+    if (!remaining) return toast('This savings goal is already complete', 1);
+    sheet(`<h3>Add to ${esc(g.name)}</h3><p class="mu">${peso(g.saved)} saved of ${peso(g.target)} · ${peso(remaining)} remaining</p><form data-f="fund" class="stack"><input type="hidden" name="id" value="${id}"><label class="amount"><span>₱</span><input name="amount" type="number" inputmode="decimal" step="0.01" min="0.01" max="${remaining}" placeholder="0" aria-label="Amount" required></label><div class="chips">${[100, 500, 1000, 5000].filter(v => v <= remaining).map(v => `<button type="button" class="chip" data-act="quick" data-id="${v}">+${peso(v)}</button>`).join('')}</div>${field('Note', '<input name="note" maxlength="200" placeholder="Optional">')}<div class="actions"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn">Add savings</button></div></form>`);
+  },
+  async goalhistory(id) {
+    const g = await api(`goals/${id}`);
+    const rows = g.contributions.length ? g.contributions.map(c => `<div class="item"><span class="ico">${I.target}</span><span class="grow"><b>${esc(c.member)}</b><small>${lbl(c.date)}${c.note ? ` · ${esc(c.note)}` : ''}</small></span><span class="amt">${peso(c.amount)}</span></div>`).join('') : empty('🎯', 'No contributions yet', 'Contributions will appear here as family members add to this goal.');
+    sheet(`<h3>${esc(g.name)}</h3><p class="mu">${peso(g.saved)} saved of ${peso(g.target)} · ${peso(g.remaining)} remaining</p><div class="card list">${rows}</div><button class="btn ghost" data-close>Close</button>`);
   },
   quick(v, el) { const i = el.closest('form').amount; i.value = (+i.value || 0) + +v; },
   async removemember(id) { const m = S.me.family.members.find(x => x.id == id); if (!await ask(`Remove ${esc(m.name)}?`, 'They will lose access to your family. Their past transactions stay in your history.', 'Remove', 1)) return; await api(`family/members/${id}`, 'DELETE'); await loadMe(); toast(`${m.name} was removed`); render(); },
@@ -459,9 +550,17 @@ const A = {
 
 /* ---------- Event wiring ---------- */
 document.addEventListener('click', async e => {
+  const scrollLink = e.target.closest('[data-scroll]');
+  if (scrollLink) {
+    document.getElementById(scrollLink.dataset.scroll)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return;
+  }
   const el = e.target.closest('[data-go],[data-back],[data-act],[data-tab],[data-filter]'); if (!el) return;
   try {
     if (el.dataset.k) S.k = el.dataset.k;
+    if (el.dataset.wk) S.wk = el.dataset.wk;
+    if (el.dataset.wid) S.wid = el.dataset.wid;
+    if (el.dataset.go === 'addtx') S.w = el.dataset.w || null;
     if (el.dataset.plan) S.plan = el.dataset.plan;
     if (el.dataset.filter) { S.filter = el.dataset.filter; document.querySelectorAll('[data-filter]').forEach(b => b.classList.toggle('on', b === el)); document.getElementById('txlist').innerHTML = txList(); }
     else if (el.dataset.go) { if (el.dataset.id) S.id = el.dataset.id; go(el.dataset.go); }
@@ -489,6 +588,7 @@ document.addEventListener('change', e => {
     return;
   }
   if (t.name === 'kind' && t.form?.dataset.f === 'savetx') document.getElementById('catchips').innerHTML = catChips(t.value);
+  if (t.name === 'card_type' && t.form?.dataset.f === 'savewallet') { t.form.querySelector('.only-credit').hidden = t.value !== 'credit'; document.getElementById('ballbl').textContent = t.value === 'credit' ? 'Amount owed now' : 'Current balance'; }
   if (t.matches('[data-avatar]') && t.files[0]) pickAvatar(t.files[0]).catch(x => toast(x.message, 1));
   if (t.matches('[data-receipt]') && t.files[0]) scanReceipt(t.files[0], t.form).catch(x => toast(x.message, 1));
 });

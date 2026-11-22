@@ -4,7 +4,7 @@
 
 - Flask serves the UI and JSON API from one process (`app.py`).
 - The browser UI is vanilla JavaScript and CSS in `public/`; there is no frontend build step.
-- Flask-SQLAlchemy uses SQLite by default (`instance/gastos.db`) and can use PostgreSQL through `DATABASE_URL`.
+- Flask-SQLAlchemy uses SQLite in development (`instance/gastos.db`) and requires PostgreSQL in production through `DATABASE_URL`.
 - Passwords use Werkzeug password hashing. Bearer sessions use signed `itsdangerous` tokens.
 - The schema is created with `db.create_all()` plus additive compatibility changes at startup. The starting repository lacked a migration framework, provider adapters, tests, project README, and external integration instructions; the local `.env` now contains the user-configured service settings.
 
@@ -24,7 +24,8 @@
 - [x] Enforce an eight-character minimum password and validate required signup fields.
 - [x] Keep password hashing and signed session tokens.
 - [x] Add one-time, 15-minute password reset links with generic responses and session invalidation.
-- [ ] Add account verification and broader per-IP rate limiting.
+- [x] Add broader per-IP, account, and email rate limiting.
+- [ ] Add account verification.
 
 ### Family and invitations
 
@@ -42,7 +43,8 @@
 
 - [x] Keep family-scoped reads and writes for existing transactions, bills, goals, and reports.
 - [x] Add transaction editing/deletion, search, category/type/month filters, sorting, and monthly category budgets.
-- [ ] Add debt/tuition ledgers, expense approvals, and goal contribution history (these modules do not exist in the original schema).
+- [ ] Add debt/tuition ledgers (these modules do not exist in the original schema).
+- [x] Add manual savings contribution rules and history.
 - [x] Reject malformed dates/transaction kinds and non-finite amounts; prevent duplicate bill payment transactions.
 
 ### Premium and payments
@@ -67,18 +69,18 @@
 - [x] Require `SECRET_KEY` and `APP_BASE_URL` in production configuration for relevant flows.
 - [x] Add regression tests for Free defaults, fail-closed Premium, invitation expiry/resend/revocation/acceptance/signup, email matching and HTML delivery, password reset, transaction/budget behavior, family isolation, and duplicate bill payment prevention.
 - [ ] Add end-to-end testing against real ngrok, Brevo, and an activated PayMongo test account.
-- [ ] Configure deployment HTTPS, CSRF strategy, rate limiting, database access policies, and production logging.
+- [ ] Configure deployment HTTPS, CSRF strategy, database access policies, and production logging.
 
 ## Database changes
 
-`Invite` gained token digest/nonce, role, inviter, timestamps, and revocation/acceptance fields. Startup applies additive `ALTER TABLE` changes for existing databases, while `create_all()` creates the new subscription table. Existing data is preserved. There is no migration runner in this repository; a formal versioned migration framework should replace startup DDL before multi-instance production deployment.
+`Invite` gained token digest/nonce, role, inviter, timestamps, and revocation/acceptance fields. The newer data model adds family-shared `Account` and `Transfer` rows, `Tx.account_id`, and `GoalContribution` history; startup creates the new tables, adds the transaction column, creates a starter wallet for each existing family, and backfills existing transactions and savings totals. Existing data is preserved. There is no migration runner in this repository; a formal versioned migration framework should replace startup DDL before multi-instance production deployment.
 
 ## Configuration and running
 
 - Copy `.env.example` to `.env`, install `requirements.txt`, then run `python app.py`. Details are in [docs/SETUP.md](docs/SETUP.md).
 - Run regression checks with `python -m unittest discover -s tests`.
-- `DATABASE_URL` is optional; unset uses SQLite. PostgreSQL URLs are supported.
-- Production requires `APP_ENV=production`, a strong `SECRET_KEY`, and canonical HTTPS `APP_BASE_URL`.
+- `DATABASE_URL` is optional in development/test; unset uses SQLite. Production requires a PostgreSQL URL.
+- Startup requires an explicit `APP_ENV` of `development`, `test`, or `production`. Production also requires a persistent 32+ character `SECRET_KEY`, canonical HTTPS `APP_BASE_URL`, and PostgreSQL; unsafe configuration fails before the app serves traffic.
 - SMTP variables are private local configuration. Delivery logic is covered with a mocked SMTP server; a real Brevo delivery is not yet verified.
 - PayMongo checkout and webhook handling are implemented and mocked in regression tests. Real checkout is not verified; the account previously returned HTTP 403 for subscription plans and still needs capability activation, test plan IDs, and a registered webhook.
 

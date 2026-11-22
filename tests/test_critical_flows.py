@@ -6,6 +6,7 @@ from datetime import date
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlsplit
 
+os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ["SECRET_KEY"] = "gastos-test-secret"
 os.environ["APP_BASE_URL"] = "https://gastos.example.test"
@@ -207,6 +208,26 @@ class CriticalFlowTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/goals", headers=member_headers,
             json={"name": "Emergency fund", "target": 500}).status_code, 403)
 
+    def test_non_owner_cannot_read_invitation_links_or_invitee_emails(self):
+        first = self.client.post("/api/invite", headers=self.owner_headers,
+                                 json={"email": "member@example.com"}).json["invitation"]
+        signup = self.client.post("/api/signup", json={
+            "name": "Member", "email": "member@example.com", "password": "password123",
+            "invite_token": first["link"].split("invite=", 1)[1],
+        })
+        member_headers = {"Authorization": f"Bearer {signup.json['token']}"}
+        self.client.post("/api/invite", headers=self.owner_headers,
+                         json={"email": "pending@example.com"})
+
+        owner_view = self.client.get("/api/me", headers=self.owner_headers).json
+        pending = next(i for i in owner_view["family"]["invites"] if i["email"] == "pending@example.com")
+        self.assertEqual(pending["status"], "pending")
+        self.assertTrue(pending["link"])
+
+        member_view = self.client.get("/api/me", headers=member_headers).json
+        self.assertEqual(member_view["family"]["invites"], [])
+        self.assertNotIn("pending@example.com", str(member_view))
+
     def test_dashboard_budget_progress_and_transaction_crud_are_family_scoped(self):
         created = self.client.post("/api/transactions", headers=self.owner_headers, json={
             "kind": "expense", "amount": 200, "category": "Food", "note": "Groceries",
@@ -267,6 +288,50 @@ class CriticalFlowTests(unittest.TestCase):
             self.assertEqual(unknown.json, response.json)
             no_account_email.assert_not_called()
 
+    def test_signin_is_rate_limited_per_account(self):
+        for _ in range(gastos.SIGNIN_EMAIL_LIMIT[0]):
+            response = self.client.post("/api/signin", json={
+                "email": "owner@example.com", "password": "wrong-password",
+            })
+            self.assertEqual(response.status_code, 401)
+        blocked = self.client.post("/api/signin", json={
+            "email": "owner@example.com", "password": "password123",
+        })
+        self.assertEqual(blocked.status_code, 429)
+        self.assertTrue(blocked.headers.get("Retry-After"))
+
+    def test_password_reset_rate_limit_keeps_generic_response(self):
+        with patch("app.send_password_reset_email", return_value="sent") as send_email:
+            responses = [
+                self.client.post("/api/password-reset/request", json={"email": "owner@example.com"})
+                for _ in range(gastos.RESET_EMAIL_LIMIT[0] + 1)
+            ]
+        self.assertTrue(all(response.status_code == 200 for response in responses))
+        self.assertEqual({response.json["message"] for response in responses}, {gastos.PASSWORD_RESET_MESSAGE})
+        self.assertEqual(send_email.call_count, 1)
+        with gastos.app.app_context():
+            self.assertGreater(
+                gastos.consume_rate_limit("reset-email", "owner@example.com", *gastos.RESET_EMAIL_LIMIT), 0
+            )
+
+    def test_signup_is_rate_limited_per_ip(self):
+        for index in range(gastos.SIGNUP_IP_LIMIT[0] - 1):
+            response = self.client.post("/api/signup", json={
+                "name": f"Signup {index}", "email": f"signup-{index}@example.com",
+                "password": "password123",
+            })
+            self.assertEqual(response.status_code, 200)
+        blocked = self.client.post("/api/signup", json={
+            "name": "Blocked", "email": "blocked-signup@example.com", "password": "password123",
+        })
+        self.assertEqual(blocked.status_code, 429)
+
+    def test_rate_limit_counter_is_enforced(self):
+        with gastos.app.app_context():
+            for _ in range(2):
+                self.assertIsNone(gastos.consume_rate_limit("test-limit", "value", 2, 60))
+            self.assertGreater(gastos.consume_rate_limit("test-limit", "value", 2, 60), 0)
+
     def test_invitation_requires_matching_email_and_owner_to_revoke(self):
         created = self.client.post("/api/invite", headers=self.owner_headers, json={"email": "intended@example.com"})
         invitation = created.json["invitation"]
@@ -280,6 +345,36 @@ class CriticalFlowTests(unittest.TestCase):
         self.assertEqual(self.client.post(f"/api/invitations/{invitation['id']}/revoke", headers=other_headers).status_code, 404)
         self.assertEqual(self.client.post(f"/api/invitations/{invitation['id']}/revoke", headers=self.owner_headers).status_code, 200)
         self.assertEqual(self.client.get(f"/api/invitations/{token}").status_code, 404)
+
+    def test_savings_contributions_record_history_and_stop_at_target(self):
+        self.assertEqual(self.client.post("/api/goals", headers=self.owner_headers, json={
+            "name": "Emergency fund", "target": 100,
+        }).status_code, 200)
+        goal_id = self.client.get("/api/goals", headers=self.owner_headers).json[0]["id"]
+        invite = self.client.post("/api/invite", headers=self.owner_headers,
+                                  json={"email": "saver@example.com"}).json["invitation"]
+        signup = self.client.post("/api/signup", json={
+            "name": "Saver", "email": "saver@example.com", "password": "password123",
+            "invite_token": invite["link"].split("invite=", 1)[1],
+        })
+        member_headers = {"Authorization": f"Bearer {signup.json['token']}"}
+        added = self.client.post(f"/api/goals/{goal_id}/add", headers=member_headers,
+                                 json={"amount": 60, "note": "Payday"})
+        self.assertEqual(added.status_code, 200)
+        detail = self.client.get(f"/api/goals/{goal_id}", headers=member_headers).json
+        self.assertEqual(detail["saved"], 60)
+        self.assertEqual(detail["remaining"], 40)
+        self.assertEqual(detail["contributions"][0]["member"], "Saver")
+        self.assertEqual(detail["contributions"][0]["note"], "Payday")
+        self.assertEqual(self.client.post(f"/api/goals/{goal_id}/add", headers=member_headers,
+            json={"amount": 50}).status_code, 409)
+        self.assertEqual(self.client.post(f"/api/goals/{goal_id}/add", headers=member_headers,
+            json={"amount": 40}).status_code, 200)
+        self.assertEqual(self.client.post(f"/api/goals/{goal_id}/add", headers=member_headers,
+            json={"amount": 1}).status_code, 409)
+        summary = self.client.get("/api/goals", headers=self.owner_headers).json[0]
+        self.assertEqual(summary["contributions"], 2)
+        self.assertEqual(summary["remaining"], 0)
 
     def test_invalid_money_dates_and_repeat_bill_payment_are_rejected(self):
         bad_amount = self.client.post("/api/transactions", headers=self.owner_headers,
@@ -388,6 +483,235 @@ class CriticalFlowTests(unittest.TestCase):
         bills = {row["name"]: row for row in self.client.get("/api/bills", headers=self.owner_headers).json}
         self.assertEqual(bills["Today bill"]["due_status"], "due_today")
         self.assertEqual(bills["Old bill"]["due_status"], "overdue")
+
+
+    def test_wallets_belong_to_each_account_and_track_balances(self):
+        def post(path, body, headers=None):
+            return self.client.post(path, headers=headers or self.owner_headers, json=body)
+
+        cash = post("/api/wallets", {"kind": "cash", "name": "Cash on hand", "opening_balance": 1000}).json["id"]
+        debit = post("/api/wallets", {"kind": "card", "card_type": "debit", "name": "Payroll", "bank": "BDO",
+                                      "last4": "4821", "opening_balance": 5000}).json["id"]
+        credit = post("/api/wallets", {"kind": "card", "card_type": "credit", "name": "Shopping", "bank": "BPI",
+                                       "last4": "1188", "credit_limit": 30000, "opening_balance": 2000}).json["id"]
+        # Only the last 4 digits are accepted; bad input is rejected.
+        for bad in ({"last4": "4111111111111111"}, {"last4": "12a4"}, {"last4": ""}, {"card_type": "prepaid"}):
+            body = {"kind": "card", "card_type": "debit", "name": "Bad", "last4": "1234", **bad}
+            self.assertEqual(post("/api/wallets", body).status_code, 400, bad)
+        self.assertEqual(post("/api/wallets", {"kind": "cash", "name": "", "opening_balance": 0}).status_code, 400)
+        self.assertEqual(post("/api/wallets", {"kind": "cash", "name": "X", "opening_balance": -5}).status_code, 400)
+        self.assertEqual(post("/api/wallets", {"kind": "crypto", "name": "X"}).status_code, 400)
+
+        today = date.today().isoformat()
+        for wallet_id, kind, amount in ((cash, "expense", 250), (cash, "income", 100), (debit, "expense", 1200),
+                                        (credit, "expense", 500), (credit, "income", 300)):
+            self.assertEqual(post("/api/transactions", {"kind": kind, "amount": amount, "category": "Other",
+                                                        "date": today, "wallet_id": wallet_id}).status_code, 200)
+        listing = self.client.get("/api/wallets", headers=self.owner_headers).json
+        balances = {w["id"]: w for w in listing["wallets"]}
+        self.assertEqual(balances[cash]["balance"], 850)
+        self.assertEqual(balances[debit]["balance"], 3800)
+        self.assertEqual(balances[credit]["owed"], 2200)          # 2000 owed + 500 spent - 300 paid
+        self.assertEqual(balances[credit]["available"], 27800)
+        self.assertEqual(listing["totals"], {"cash": 850, "debit": 3800, "available": 4650, "owed": 2200})
+        self.assertEqual([w["kind"] for w in listing["wallets"]], ["cash", "card", "card"])
+
+        # Adjust sets the balance (or the amount owed) without adding a transaction.
+        self.assertEqual(post(f"/api/wallets/{cash}/adjust", {"amount": 1000}).status_code, 200)
+        self.assertEqual(post(f"/api/wallets/{credit}/adjust", {"amount": 0}).status_code, 200)
+        balances = {w["id"]: w for w in self.client.get("/api/wallets", headers=self.owner_headers).json["wallets"]}
+        self.assertEqual(balances[cash]["balance"], 1000)
+        self.assertEqual(balances[credit]["owed"], 0)
+        self.assertEqual(len(self.client.get("/api/transactions", headers=self.owner_headers).json), 5)
+
+        # Wallet detail shows its own transactions; edit keeps the card type and never changes the balance.
+        detail = self.client.get(f"/api/wallets/{debit}", headers=self.owner_headers).json
+        self.assertEqual([t["wallet"] for t in detail["transactions"]], ["Payroll"])
+        edited = self.client.put(f"/api/wallets/{debit}", headers=self.owner_headers,
+                                 json={"name": "Payroll card", "bank": "BDO", "last4": "9999", "card_type": "credit"})
+        self.assertEqual(edited.status_code, 200)
+        detail = self.client.get(f"/api/wallets/{debit}", headers=self.owner_headers).json
+        self.assertEqual((detail["name"], detail["last4"], detail["card_type"], detail["balance"]),
+                         ("Payroll card", "9999", "debit", 3800))
+
+        # A transaction can only use a wallet that exists and belongs to the person logging it.
+        self.assertEqual(post("/api/transactions", {"kind": "expense", "amount": 5, "category": "Food",
+                                                    "wallet_id": 99999}).status_code, 400)
+
+        # A family member has their own wallets: they cannot see, use or change the owner's, and any
+        # member can manage their own without being a Parent.
+        invite = self.client.post("/api/invite", headers=self.owner_headers, json={"email": "wallet-member@example.com"}).json["invitation"]
+        token = invite["link"].split("invite=", 1)[1]
+        signup = self.client.post("/api/signup", json={"name": "Wallet Member", "email": "wallet-member@example.com",
+                                                       "password": "password123", "invite_token": token})
+        member = {"Authorization": f"Bearer {signup.json['token']}"}
+        self.assertEqual(self.client.get("/api/wallets", headers=member).json["wallets"], [])
+        self.assertEqual(self.client.get(f"/api/wallets/{cash}", headers=member).status_code, 404)
+        self.assertEqual(self.client.put(f"/api/wallets/{cash}", headers=member, json={"name": "Mine"}).status_code, 404)
+        self.assertEqual(post(f"/api/wallets/{cash}/adjust", {"amount": 1}, member).status_code, 404)
+        self.assertEqual(self.client.delete(f"/api/wallets/{cash}", headers=member).status_code, 404)
+        self.assertEqual(post("/api/transactions", {"kind": "expense", "amount": 10, "category": "Food",
+                                                    "wallet_id": cash}, member).status_code, 400)
+        mine = post("/api/wallets", {"kind": "cash", "name": "Allowance", "opening_balance": 200}, member)
+        self.assertEqual(mine.status_code, 200)
+        self.assertEqual(post("/api/transactions", {"kind": "expense", "amount": 50, "category": "Food",
+                                                    "date": today, "wallet_id": mine.json["id"]}, member).status_code, 200)
+        member_wallets = self.client.get("/api/wallets", headers=member).json
+        self.assertEqual([(w["name"], w["balance"]) for w in member_wallets["wallets"]], [("Allowance", 150)])
+        # The owner's balances are unaffected, and the owner never sees the member's wallet name or id.
+        owner_wallets = self.client.get("/api/wallets", headers=self.owner_headers).json["wallets"]
+        self.assertEqual(sorted(w["name"] for w in owner_wallets), ["Cash on hand", "Payroll card", "Shopping"])
+        member_tx = [t for t in self.client.get("/api/transactions", headers=self.owner_headers).json if t["amount"] == 50][0]
+        self.assertEqual((member_tx["wallet"], member_tx["wallet_id"], member_tx["mine"]), (None, None, False))
+        # Even an owner editing the member's transaction cannot attach the owner's wallet to it.
+        self.assertEqual(self.client.put(f"/api/transactions/{member_tx['id']}", headers=self.owner_headers,
+                                         json={"kind": "expense", "amount": 50, "category": "Food", "date": today,
+                                               "wallet_id": cash}).status_code, 400)
+
+        # Another family's account sees nothing of this one.
+        other = self.client.post("/api/signup", json={"name": "Other", "email": "other-wallets@example.com", "password": "password123"})
+        other_headers = {"Authorization": f"Bearer {other.json['token']}"}
+        self.client.post("/api/family", headers=other_headers, json={"name": "Other Family"})
+        self.assertEqual(self.client.get(f"/api/wallets/{cash}", headers=other_headers).status_code, 404)
+        self.assertEqual(self.client.get("/api/wallets", headers=other_headers).json["wallets"], [])
+
+        # Dashboard summary is per account, then deleting a wallet keeps its transactions but unlinks them.
+        dash = self.client.get("/api/dashboard", headers=self.owner_headers).json
+        self.assertEqual(dash["wallet_count"], 3)
+        self.assertEqual(dash["wallet_totals"]["available"], dash["wallet_totals"]["cash"] + dash["wallet_totals"]["debit"])
+        self.assertEqual(self.client.get("/api/dashboard", headers=member).json["wallet_count"], 1)
+        self.assertEqual(self.client.delete(f"/api/wallets/{debit}", headers=self.owner_headers).status_code, 200)
+        rows = self.client.get("/api/transactions", headers=self.owner_headers).json
+        self.assertEqual(len(rows), 6)
+        self.assertEqual([r["wallet"] for r in rows if r["amount"] == 1200], [None])
+
+    def test_cash_and_debit_wallets_cannot_be_overdrawn_but_credit_cards_can(self):
+        def post(path, body):
+            return self.client.post(path, headers=self.owner_headers, json=body)
+
+        cash = post("/api/wallets", {"kind": "cash", "name": "Cash", "opening_balance": 100}).json["id"]
+        credit = post("/api/wallets", {"kind": "card", "card_type": "credit", "name": "Card", "last4": "1111",
+                                       "opening_balance": 0}).json["id"]
+        spend = {"kind": "expense", "category": "Food", "date": date.today().isoformat()}
+        self.assertEqual(post("/api/transactions", {**spend, "amount": 150, "wallet_id": cash}).status_code, 400)
+        self.assertEqual(post("/api/transactions", {**spend, "amount": 100, "wallet_id": cash}).status_code, 200)
+        self.assertEqual(post("/api/transactions", {**spend, "amount": 5000, "wallet_id": credit}).status_code, 200)
+        self.assertEqual(post("/api/transactions", {**spend, "amount": 5000}).status_code, 200)
+        tx = [t for t in self.client.get("/api/transactions", headers=self.owner_headers).json if t["wallet_id"] == cash][0]
+        edit = self.client.put(f"/api/transactions/{tx['id']}", headers=self.owner_headers,
+                               json={**spend, "amount": 90, "wallet_id": cash})
+        self.assertEqual(edit.status_code, 200)
+        edit = self.client.put(f"/api/transactions/{tx['id']}", headers=self.owner_headers,
+                               json={**spend, "amount": 120, "wallet_id": cash})
+        self.assertEqual(edit.status_code, 400)
+
+    def test_paying_a_bill_can_use_a_wallet(self):
+        cash = self.client.post("/api/wallets", headers=self.owner_headers,
+                                json={"kind": "cash", "name": "Cash", "opening_balance": 500}).json["id"]
+        for name, amount in (("Power", 300), ("Rent", 9000)):
+            self.client.post("/api/bills", headers=self.owner_headers, json={"name": name, "amount": amount})
+        bills = {b["name"]: b["id"] for b in self.client.get("/api/bills", headers=self.owner_headers).json}
+        self.assertEqual(self.client.post(f"/api/bills/{bills['Rent']}/pay", headers=self.owner_headers,
+                                          json={"wallet_id": cash}).status_code, 400)
+        self.assertEqual(self.client.post(f"/api/bills/{bills['Power']}/pay", headers=self.owner_headers,
+                                          json={"wallet_id": cash}).status_code, 200)
+        balance = self.client.get("/api/wallets", headers=self.owner_headers).json["wallets"][0]["balance"]
+        self.assertEqual(balance, 200)
+        self.assertEqual(self.client.post(f"/api/bills/{bills['Rent']}/pay", headers=self.owner_headers).status_code, 200)
+
+    def test_goals_can_be_edited_and_deleted_by_managers(self):
+        self.client.post("/api/goals", headers=self.owner_headers, json={"name": "Trip", "target": 1000})
+        goal_id = self.client.get("/api/goals", headers=self.owner_headers).json[0]["id"]
+        self.client.post(f"/api/goals/{goal_id}/add", headers=self.owner_headers, json={"amount": 400})
+        over = self.client.post(f"/api/goals/{goal_id}/add", headers=self.owner_headers, json={"amount": 5000})
+        self.assertIn("₱600.00", over.json["error"])
+        self.assertEqual(self.client.put(f"/api/goals/{goal_id}", headers=self.owner_headers,
+                                         json={"name": "Trip", "target": 300}).status_code, 400)
+        self.assertEqual(self.client.put(f"/api/goals/{goal_id}", headers=self.owner_headers,
+                                         json={"name": "Beach trip", "target": 2000}).status_code, 200)
+        self.assertEqual(self.client.get(f"/api/goals/{goal_id}", headers=self.owner_headers).json["name"], "Beach trip")
+        self.assertEqual(self.client.delete(f"/api/goals/{goal_id}", headers=self.owner_headers).status_code, 200)
+        self.assertEqual(self.client.get("/api/goals", headers=self.owner_headers).json, [])
+
+    def test_unknown_api_routes_return_json_and_responses_carry_security_headers(self):
+        missing = self.client.get("/api/does-not-exist", headers=self.owner_headers)
+        self.assertEqual(missing.status_code, 404)
+        self.assertIn("error", missing.json)
+        self.assertEqual(missing.headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(missing.headers["X-Frame-Options"], "DENY")
+
+class RuntimeConfigTests(unittest.TestCase):
+    base_env = {
+        "APP_ENV": "production",
+        "SECRET_KEY": "production-secret-key-" + "x" * 32,
+        "DATABASE_URL": "postgresql://user:password@db.example.test/gastos",
+        "APP_BASE_URL": "https://gastos.example.test",
+    }
+
+    def config(self, **overrides):
+        env = dict(self.base_env)
+        for key, value in overrides.items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
+        with patch.dict(os.environ, env, clear=True):
+            return gastos.runtime_config()
+
+    def test_runtime_config_requires_explicit_environment(self):
+        with self.assertRaisesRegex(RuntimeError, "APP_ENV must be explicitly set"):
+            self.config(APP_ENV=None)
+        with self.assertRaisesRegex(RuntimeError, "APP_ENV must be explicitly set"):
+            self.config(APP_ENV="prod")
+
+    def test_development_generates_ephemeral_secret_when_missing(self):
+        environment, secret, _, generated = self.config(APP_ENV="development", SECRET_KEY=None)
+        self.assertEqual(environment, "development")
+        self.assertTrue(generated)
+        self.assertNotEqual(secret, gastos.LEGACY_INSECURE_SECRET)
+        self.assertGreaterEqual(len(secret), 32)
+
+    def test_production_requires_secret(self):
+        with self.assertRaisesRegex(RuntimeError, "SECRET_KEY must be configured in production"):
+            self.config(SECRET_KEY=None)
+
+    def test_runtime_config_rejects_old_placeholder_secret(self):
+        with self.assertRaisesRegex(RuntimeError, "old development placeholder"):
+            self.config(SECRET_KEY=gastos.LEGACY_INSECURE_SECRET)
+
+    def test_production_requires_long_secret(self):
+        with self.assertRaisesRegex(RuntimeError, "at least 32 characters"):
+            self.config(SECRET_KEY="too-short")
+
+    def test_production_requires_postgres(self):
+        with self.assertRaisesRegex(RuntimeError, "persistent PostgreSQL"):
+            self.config(DATABASE_URL="sqlite:///gastos.db")
+        with self.assertRaisesRegex(RuntimeError, "persistent PostgreSQL"):
+            self.config(DATABASE_URL="mysql://user:password@db.example.test/gastos")
+        with self.assertRaisesRegex(RuntimeError, "DATABASE_URL must be configured"):
+            self.config(DATABASE_URL=None)
+
+    def test_production_requires_https_app_origin(self):
+        with self.assertRaisesRegex(RuntimeError, "must be configured in production"):
+            self.config(APP_BASE_URL=None)
+        with self.assertRaisesRegex(RuntimeError, "public HTTPS origin"):
+            self.config(APP_BASE_URL="http://gastos.example.test")
+        with self.assertRaisesRegex(RuntimeError, "without a path"):
+            self.config(APP_BASE_URL="https://gastos.example.test/app")
+
+    def test_development_can_use_default_sqlite_and_test_can_use_memory(self):
+        environment, _, url, _ = self.config(APP_ENV="development", DATABASE_URL=None)
+        self.assertEqual(environment, "development")
+        self.assertEqual(url, "sqlite:///gastos.db")
+        environment, _, url, _ = self.config(APP_ENV="test", DATABASE_URL="sqlite:///:memory:")
+        self.assertEqual(environment, "test")
+        self.assertEqual(url, "sqlite:///:memory:")
+
+    def test_postgres_url_is_normalized_for_psycopg2(self):
+        environment, _, url, generated = self.config(DATABASE_URL="postgres://user:password@db.example.test/gastos")
+        self.assertEqual(environment, "production")
+        self.assertFalse(generated)
+        self.assertEqual(url, "postgresql+psycopg2://user:password@db.example.test/gastos")
 
 
 if __name__ == "__main__":

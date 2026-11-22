@@ -5,6 +5,7 @@ from email.utils import formataddr
 from functools import wraps
 from flask import Flask, request, jsonify, send_from_directory, Response, g
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.exc import IntegrityError
 from werkzeug.security import generate_password_hash, check_password_hash
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from urllib.parse import urlencode, urlsplit
@@ -38,39 +39,77 @@ APP_TIMEZONE = timezone(timedelta(hours=8), "Asia/Manila")
 def app_today():
     return datetime.now(APP_TIMEZONE).date()
 
-app = Flask(__name__, static_folder="public", static_url_path="")
-secret = os.environ.get("SECRET_KEY")
-if not secret and os.environ.get("APP_ENV") == "production":
-    raise RuntimeError("SECRET_KEY must be configured in production")
-secret = secret or "local-development-only-change-me"
-url = os.environ.get("DATABASE_URL", "sqlite:///gastos.db")
-if url.startswith(("postgres://", "postgresql://")):
-    # Name the installed driver: SQLAlchemy 2.1 otherwise defaults to psycopg 3, which isn't in requirements.txt.
-    url = "postgresql+psycopg2://" + url.split("://", 1)[1]
+LEGACY_INSECURE_SECRET = "local-development-only-change-me"  # rejected; never used as a fallback
+ALLOWED_APP_ENVS = ("development", "test", "production")
+
+
 def configured_app_base_url():
     return os.environ.get("APP_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
 
 
-if os.environ.get("APP_ENV") == "production":
-    configured_base = configured_app_base_url()
-    if not configured_base:
-        raise RuntimeError("APP_BASE_URL or the hosting platform's public HTTPS URL must be configured in production")
-    public_url = urlsplit(configured_base)
-    if public_url.scheme != "https" or not public_url.netloc or public_url.username or public_url.password:
-        raise RuntimeError("APP_BASE_URL must be a public HTTPS origin in production")
-    if public_url.path not in ("", "/") or public_url.query or public_url.fragment:
-        raise RuntimeError("APP_BASE_URL must be an origin without a path, query, or fragment")
-    if url.startswith("sqlite:"):
-        raise RuntimeError("DATABASE_URL must point to persistent PostgreSQL in production")
+def runtime_config():
+    """Read runtime settings and fail closed when configuration is unsafe."""
+    environment = (os.environ.get("APP_ENV") or "").strip().lower()
+    if environment not in ALLOWED_APP_ENVS:
+        raise RuntimeError("APP_ENV must be explicitly set to development, test, or production")
+    secret_key = (os.environ.get("SECRET_KEY") or "").strip()
+    generated_secret = False
+    if not secret_key:
+        if environment == "production":
+            raise RuntimeError("SECRET_KEY must be configured in production")
+        secret_key = secrets.token_urlsafe(48)
+        generated_secret = True
+    if secret_key == LEGACY_INSECURE_SECRET:
+        raise RuntimeError("SECRET_KEY must not use the old development placeholder")
+    if environment == "production" and len(secret_key) < 32:
+        raise RuntimeError("SECRET_KEY must be at least 32 characters in production")
+    database_url = (os.environ.get("DATABASE_URL") or "").strip()
+    if not database_url:
+        if environment == "production":
+            raise RuntimeError("DATABASE_URL must be configured in production")
+        database_url = "sqlite:///gastos.db"
+    if database_url.startswith(("postgres://", "postgresql://")):
+        # Name the installed driver: SQLAlchemy 2.1 otherwise defaults to psycopg 3, which isn't in requirements.txt.
+        database_url = "postgresql+psycopg2://" + database_url.split("://", 1)[1]
+    if environment == "production":
+        configured_base = configured_app_base_url()
+        if not configured_base:
+            raise RuntimeError("APP_BASE_URL or the hosting platform's public HTTPS URL must be configured in production")
+        public_url = urlsplit(configured_base)
+        if public_url.scheme != "https" or not public_url.netloc or public_url.username or public_url.password:
+            raise RuntimeError("APP_BASE_URL must be a public HTTPS origin in production")
+        if public_url.path not in ("", "/") or public_url.query or public_url.fragment:
+            raise RuntimeError("APP_BASE_URL must be an origin without a path, query, or fragment")
+        if not database_url.startswith("postgresql"):
+            raise RuntimeError("DATABASE_URL must point to persistent PostgreSQL in production")
+    return environment, secret_key, database_url, generated_secret
+
+
+APP_ENV, secret, url, generated_secret = runtime_config()
+app = Flask(__name__, static_folder="public", static_url_path="")
 app.config.update(SQLALCHEMY_DATABASE_URI=url,
                   SQLALCHEMY_ENGINE_OPTIONS={"pool_pre_ping": True})
+if generated_secret:
+    app.logger.warning("SECRET_KEY is not set; using an ephemeral %s key. Sessions will reset when the process restarts.", APP_ENV)
 db = SQLAlchemy(app)
 ser = URLSafeTimedSerializer(secret)
 invite_ser = URLSafeTimedSerializer(secret, salt="gastos-invitation-v1")
 reset_ser = URLSafeTimedSerializer(secret, salt="gastos-password-reset-v1")
 LIMIT = {"free": 4, "premium": 10}
 FREE_BUDGETS = 3
+MAX_WALLETS = 10  # per account
 FAMILY_ROLES = ("Parent", "Member")
+ACCOUNT_KINDS = ("Cash", "Bank", "E-wallet", "Credit", "Other")
+SIGNIN_IP_LIMIT = (60, 15 * 60)
+SIGNIN_EMAIL_LIMIT = (5, 15 * 60)
+SIGNUP_IP_LIMIT = (10, 60 * 60)
+RESET_IP_LIMIT = (10, 60 * 60)
+RESET_EMAIL_LIMIT = (5, 15 * 60)
+INVITE_OWNER_LIMIT = (20, 60 * 60)
+INVITE_RECIPIENT_LIMIT = (5, 60 * 60)
+EMAIL_GLOBAL_LIMIT = (100, 60 * 60)
+EMAIL_RECIPIENT_LIMIT = (10, 60 * 60)
+PASSWORD_RESET_MESSAGE = "If an account exists for that email and email delivery is available, a password reset link will arrive shortly."
 
 
 def can_manage_finances(user=None):
@@ -134,10 +173,28 @@ class WebhookEvent(db.Model):
     received_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
 
+class RateLimit(db.Model):
+    """Short-lived counters keyed by a hashed scope and value."""
+    key = db.Column(db.String(200), primary_key=True)
+    count = db.Column(db.Integer, nullable=False, default=0)
+    window_started = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+
+
+class Account(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    family_id = db.Column(db.Integer, index=True, nullable=False)
+    name = db.Column(db.String(120), nullable=False)
+    kind = db.Column(db.String(30), nullable=False, default="Cash")
+    opening_balance = db.Column(db.Float, nullable=False, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+
 class Tx(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     family_id = db.Column(db.Integer, index=True)
     user_id = db.Column(db.Integer)
+    account_id = db.Column(db.Integer, db.ForeignKey("account.id"), index=True)
     kind = db.Column(db.String(10))  # income | expense
     amount = db.Column(db.Float)
     category = db.Column(db.String(60))
@@ -145,6 +202,39 @@ class Tx(db.Model):
     date = db.Column(db.Date, default=app_today)
     status = db.Column(db.String(12), nullable=False, default="approved", server_default="approved")  # approved | pending | rejected
     receipt_data = db.Column(db.Text)
+    wallet_id = db.Column(db.Integer, index=True)  # optional: which Cash/Card wallet this money moved through
+
+
+class Wallet(db.Model):
+    """A Cash Wallet or Card Wallet that belongs to one user account (private to that account).
+
+    Its balance is opening_balance plus the approved transactions that account linked to it.
+
+    For credit cards opening_balance is stored negative (money owed), so one formula covers every wallet.
+    Only the last 4 digits of a card are stored: never the full number, expiry or CVV.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, index=True, nullable=False)
+    kind = db.Column(db.String(10), nullable=False)  # cash | card
+    name = db.Column(db.String(80), nullable=False)
+    bank = db.Column(db.String(80))
+    card_type = db.Column(db.String(10))  # debit | credit (cards only)
+    last4 = db.Column(db.String(4))
+    credit_limit = db.Column(db.Float)
+    opening_balance = db.Column(db.Float, nullable=False, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class Transfer(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    family_id = db.Column(db.Integer, index=True, nullable=False)
+    from_account_id = db.Column(db.Integer, nullable=False)
+    to_account_id = db.Column(db.Integer, nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    date = db.Column(db.Date, default=app_today, nullable=False)
+    note = db.Column(db.String(200), default="")
+    created_by = db.Column(db.Integer)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
 
 class Bill(db.Model):
@@ -162,6 +252,18 @@ class Goal(db.Model):
     name = db.Column(db.String(120))
     target = db.Column(db.Float)
     saved = db.Column(db.Float, default=0)
+
+
+class GoalContribution(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    family_id = db.Column(db.Integer, index=True, nullable=False)
+    goal_id = db.Column(db.Integer, index=True, nullable=False)
+    user_id = db.Column(db.Integer)
+    member_name = db.Column(db.String(120))
+    amount = db.Column(db.Float, nullable=False)
+    note = db.Column(db.String(200), default="")
+    date = db.Column(db.Date, default=app_today, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
 
 class Budget(db.Model):
@@ -196,7 +298,8 @@ with app.app_context():
             with db.engine.begin() as conn:
                 conn.exec_driver_sql(f"ALTER TABLE {user_table} ADD COLUMN {name} {sql}")
     tx_cols = {c["name"] for c in db.inspect(db.engine).get_columns("tx")}
-    for name, sql in {"status": "VARCHAR(12) NOT NULL DEFAULT 'approved'", "receipt_data": "TEXT"}.items():
+    for name, sql in {"status": "VARCHAR(12) NOT NULL DEFAULT 'approved'", "receipt_data": "TEXT",
+                      "account_id": "INTEGER", "wallet_id": "INTEGER"}.items():
         if name not in tx_cols:
             with db.engine.begin() as conn:
                 conn.exec_driver_sql(f"ALTER TABLE tx ADD COLUMN {name} {sql}")
@@ -217,11 +320,86 @@ with app.app_context():
         inv.expires_at = datetime.utcnow() + timedelta(days=7)
         signed = invite_ser.dumps({"id": inv.id, "nonce": inv.token_nonce})
         inv.token_hash = hashlib.sha256(signed.encode()).hexdigest()
+    # Preserve savings totals from before contribution history existed.
+    for goal in Goal.query.all():
+        if (goal.saved or 0) > 0 and not GoalContribution.query.filter_by(goal_id=goal.id).first():
+            db.session.add(GoalContribution(family_id=goal.family_id, goal_id=goal.id,
+                                            amount=goal.saved, member_name="Opening balance",
+                                            note="Imported before contribution history"))
     db.session.commit()
 
 
 def err(m, c=400):
     return jsonify(error=m), c
+
+
+@app.errorhandler(404)
+@app.errorhandler(405)
+def api_not_found(e):
+    if request.path.startswith("/api/"):
+        return err("This API endpoint does not exist" if e.code == 404 else "This method is not allowed here", e.code)
+    return e
+
+
+@app.after_request
+def security_headers(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    return response
+
+
+def rate_limit_key(scope, value):
+    return f"{scope}:{hashlib.sha256(str(value).encode()).hexdigest()}"
+
+
+def client_ip():
+    if os.environ.get("TRUST_PROXY_HEADERS") == "1":
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",", 1)[0].strip() or "unknown"
+    return request.remote_addr or "unknown"
+
+
+def consume_rate_limit(scope, value, limit, window_seconds, retry=True):
+    """Consume one slot for a hashed rate-limit key; return seconds to wait when blocked."""
+    now = datetime.utcnow()
+    key = rate_limit_key(scope, value)
+    RateLimit.query.filter(RateLimit.expires_at <= now).delete(synchronize_session=False)
+    row = RateLimit.query.filter_by(key=key).first()
+    if row is None:
+        row = RateLimit(key=key, count=1, window_started=now,
+                        expires_at=now + timedelta(seconds=window_seconds))
+        db.session.add(row)
+    elif row.count >= limit:
+        retry_after = max(1, math.ceil((row.expires_at - now).total_seconds()))
+        db.session.commit()
+        return retry_after
+    else:
+        row.count += 1
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        if not retry:
+            return window_seconds
+        return consume_rate_limit(scope, value, limit, window_seconds, retry=False)
+    return None
+
+
+def rate_limited(retry_after):
+    response = jsonify(error="Too many attempts. Please try again later.")
+    response.status_code = 429
+    response.headers["Retry-After"] = str(max(1, int(retry_after)))
+    return response
+
+
+def email_quota_available(recipient):
+    if consume_rate_limit("email-global", "all", *EMAIL_GLOBAL_LIMIT):
+        return False
+    if consume_rate_limit("email-recipient", recipient.lower(), *EMAIL_RECIPIENT_LIMIT):
+        return False
+    return True
 
 
 def body():
@@ -316,7 +494,7 @@ def public_app_link(params):
     if (parts.scheme not in ("http", "https") or not parts.netloc or parts.username or parts.password
             or parts.query or parts.fragment):
         raise RuntimeError("APP_BASE_URL must be a valid public app origin without credentials, query, or fragment")
-    if os.environ.get("APP_ENV") == "production" and parts.scheme != "https":
+    if APP_ENV == "production" and parts.scheme != "https":
         raise RuntimeError("APP_BASE_URL must use HTTPS in production")
     return f"{base.rstrip('/')}/?{urlencode(params)}"
 
@@ -343,6 +521,9 @@ def send_invitation_email(inv, link):
                 os.environ.get("SMTP_PASSWORD"), os.environ.get("SMTP_FROM"))
     if not all(settings):
         return "manual_share"
+    if not email_quota_available(inv.email):
+        app.logger.warning("Invitation email throttled by rate limit")
+        return "failed"
     family = db.session.get(Family, inv.family_id)
     inviter = db.session.get(User, inv.inviter_id) if inv.inviter_id else None
     expires = inv.expires_at.strftime("%B %d, %Y %H:%M UTC") if inv.expires_at else "in 7 days"
@@ -403,6 +584,9 @@ def send_password_reset_email(user, link):
                 os.environ.get("SMTP_PASSWORD"), os.environ.get("SMTP_FROM"))
     if not all(settings):
         return "manual_share"
+    if not email_quota_available(user.email):
+        app.logger.warning("Password reset email throttled by rate limit")
+        return "failed"
     message = EmailMessage()
     message["Subject"] = "Reset your Gastos password"
     sender = os.environ["SMTP_FROM"]
@@ -482,6 +666,11 @@ def password_reset_request():
     d = body()
     email = d.get("email") if isinstance(d.get("email"), str) else ""
     email = email.strip().lower()
+    reset_block = consume_rate_limit("reset-ip", client_ip(), *RESET_IP_LIMIT)
+    if not reset_block:
+        reset_block = consume_rate_limit("reset-email", email or "missing", *RESET_EMAIL_LIMIT)
+    if reset_block:
+        return jsonify(message=PASSWORD_RESET_MESSAGE)
     user = User.query.filter_by(email=email).first() if re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) else None
     now = datetime.utcnow()
     if user and (not user.reset_requested_at or user.reset_requested_at < now - timedelta(minutes=1)):
@@ -498,7 +687,7 @@ def password_reset_request():
         except Exception:
             db.session.rollback()
             app.logger.exception("Password reset request could not be completed")
-    return jsonify(message="If an account exists for that email and email delivery is available, a password reset link will arrive shortly.")
+    return jsonify(message=PASSWORD_RESET_MESSAGE)
 
 
 @app.post("/api/password-reset/complete")
@@ -530,6 +719,9 @@ def password_reset_complete():
 
 @app.post("/api/signup")
 def signup():
+    rate_block = consume_rate_limit("signup-ip", client_ip(), *SIGNUP_IP_LIMIT)
+    if rate_block:
+        return rate_limited(rate_block)
     d = body()
     name = d.get("name") if isinstance(d.get("name"), str) else ""
     email = d.get("email") if isinstance(d.get("email"), str) else ""
@@ -572,6 +764,11 @@ def signin():
     d = body()
     email = d.get("email") if isinstance(d.get("email"), str) else ""
     password = d.get("password") if isinstance(d.get("password"), str) else ""
+    rate_block = consume_rate_limit("signin-ip", client_ip(), *SIGNIN_IP_LIMIT)
+    if not rate_block:
+        rate_block = consume_rate_limit("signin-email", email.strip().lower(), *SIGNIN_EMAIL_LIMIT)
+    if rate_block:
+        return rate_limited(rate_block)
     u = User.query.filter_by(email=email.strip().lower()).first()
     if not u or not check_password_hash(u.pw, password):
         return err("Wrong email or password", 401)
@@ -584,6 +781,16 @@ def me():
     u, out = g.u, {"name": g.u.name, "email": g.u.email, "family": None}
     if u.family_id:
         f = db.session.get(Family, u.family_id)
+        invites = []
+        if u.is_owner:
+            invites = [{"id": i.id, "email": i.email, "role": i.role or "Member",
+                        "expires": i.expires_at.isoformat() if i.expires_at else None,
+                        "status": ("accepted" if i.accepted_at else "revoked" if i.revoked_at else
+                                   "expired" if i.expires_at and i.expires_at <= datetime.utcnow() else "pending"),
+                        "delivery": i.delivery_status or "manual_share",
+                        "link": invitation_link(i) if not i.accepted_at and not i.revoked_at and
+                                (not i.expires_at or i.expires_at > datetime.utcnow()) else None}
+                       for i in Invite.query.filter_by(family_id=f.id).order_by(Invite.id.desc()).limit(50)]
         out["family"] = {"name": f.name, "plan": f.plan, "limit": LIMIT[f.plan], "owner": u.is_owner,
                          "role": "Owner" if u.is_owner else (u.role or "Member"),
                          "permissions": {"manage_members": bool(u.is_owner),
@@ -591,14 +798,7 @@ def me():
                                          "manage_billing": bool(u.is_owner)},
                          "members": [{"id": m.id, "name": m.name, "role": m.role, "owner": m.is_owner}
                                      for m in User.query.filter_by(family_id=f.id)],
-                         "invites": [{"id": i.id, "email": i.email, "role": i.role or "Member",
-                                      "expires": i.expires_at.isoformat() if i.expires_at else None,
-                                      "status": ("accepted" if i.accepted_at else "revoked" if i.revoked_at else
-                                                 "expired" if i.expires_at and i.expires_at <= datetime.utcnow() else "pending"),
-                                      "delivery": i.delivery_status or "manual_share",
-                                      "link": invitation_link(i) if not i.accepted_at and not i.revoked_at and
-                                              (not i.expires_at or i.expires_at > datetime.utcnow()) else None}
-                                     for i in Invite.query.filter_by(family_id=f.id).order_by(Invite.id.desc()).limit(50)]}
+                         "invites": invites}
     return jsonify(out)
 
 
@@ -726,6 +926,11 @@ def invite():
     role = data.get("role", "Member")
     if role not in FAMILY_ROLES:
         return err("Choose Parent or Member")
+    rate_block = consume_rate_limit("invite-owner", g.u.id, *INVITE_OWNER_LIMIT)
+    if not rate_block:
+        rate_block = consume_rate_limit("invite-recipient", email, *INVITE_RECIPIENT_LIMIT)
+    if rate_block:
+        return rate_limited(rate_block)
     now = datetime.utcnow()
     used = User.query.filter_by(family_id=g.f.id).count() + Invite.query.filter_by(
         family_id=g.f.id, accepted_at=None, revoked_at=None
@@ -817,6 +1022,11 @@ def resend_invitation(i):
     if not g.u.is_owner:
         return err("Only the family owner can resend invitations", 403)
     inv = Invite.query.filter_by(id=i, family_id=g.f.id, accepted_at=None, revoked_at=None).first_or_404()
+    rate_block = consume_rate_limit("invite-owner", g.u.id, *INVITE_OWNER_LIMIT)
+    if not rate_block:
+        rate_block = consume_rate_limit("invite-recipient", inv.email, *INVITE_RECIPIENT_LIMIT)
+    if rate_block:
+        return rate_limited(rate_block)
     if inv.delivery_attempted_at and inv.delivery_attempted_at > datetime.utcnow() - timedelta(minutes=1):
         return err("This invitation was just emailed. Wait a minute before resending.", 429)
     inv.expires_at = datetime.utcnow() + timedelta(days=7)
@@ -1077,6 +1287,51 @@ def num(v):
     return x
 
 
+def nonnegative_num(v):
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        raise ValueError("Enter an opening balance of zero or more")
+    if not math.isfinite(x) or x < 0:
+        raise ValueError("Enter an opening balance of zero or more")
+    if x > 1_000_000_000:
+        raise ValueError("Enter an amount up to ₱1,000,000,000")
+    return x
+
+
+def account_snapshot(family_id):
+    accounts = Account.query.filter_by(family_id=family_id).order_by(Account.id).all()
+    balances = {a.id: a.opening_balance or 0 for a in accounts}
+    for row in Tx.query.filter_by(family_id=family_id, status="approved"):
+        if row.account_id in balances:
+            balances[row.account_id] += row.amount if row.kind == "income" else -row.amount
+    for transfer in Transfer.query.filter_by(family_id=family_id):
+        if transfer.from_account_id in balances:
+            balances[transfer.from_account_id] -= transfer.amount
+        if transfer.to_account_id in balances:
+            balances[transfer.to_account_id] += transfer.amount
+    return [{"id": a.id, "name": a.name, "kind": a.kind,
+             "opening_balance": a.opening_balance or 0,
+             "balance": round(balances[a.id], 2)} for a in accounts]
+
+
+def default_account(family_id):
+    account = Account.query.filter_by(family_id=family_id).order_by(Account.id).first()
+    if not account:
+        account = Account(family_id=family_id, name="Family cash", kind="Cash", opening_balance=0)
+        db.session.add(account)
+        db.session.flush()
+    return account
+
+
+def account_for_family(family_id, value):
+    try:
+        account_id = int(value)
+    except (TypeError, ValueError):
+        return None
+    return Account.query.filter_by(id=account_id, family_id=family_id).first()
+
+
 def needs_approval(kind):
     """Premium families: expenses logged by non-owners wait for the owner's approval."""
     return premium() and not g.u.is_owner and kind == "expense"
@@ -1106,6 +1361,57 @@ def pdate(s):
         raise ValueError("Enter a valid date")
 
 
+def num0(v):
+    """Like num(), but 0 is allowed (opening balances and balance corrections)."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        raise ValueError("Enter a valid amount")
+    if not math.isfinite(x) or x < 0:
+        raise ValueError("Enter an amount of 0 or more")
+    if x > 1_000_000_000:
+        raise ValueError("Enter an amount up to ₱1,000,000,000")
+    return x
+
+
+def wallet_from(d, owner_id):
+    """The wallet_id sent with a transaction: (id or None, error or None). It must be one of the owner's own wallets."""
+    raw = d.get("wallet_id")
+    if raw in (None, ""):
+        return None, None
+    try:
+        wid = int(raw)
+    except (TypeError, ValueError):
+        return None, "Choose one of your own wallets"
+    if not Wallet.query.filter_by(id=wid, user_id=owner_id).first():
+        return None, "Choose one of your own wallets"
+    return wid, None
+
+
+def overdraft_error(wallet_id, amount, skip_tx_id=None):
+    wallet = db.session.get(Wallet, wallet_id) if wallet_id else None
+    if not wallet or is_credit(wallet):
+        return None
+    q = db.session.query(Tx.kind, db.func.sum(Tx.amount)).filter(
+        Tx.wallet_id == wallet.id, Tx.user_id == wallet.user_id, Tx.status == "approved")
+    if skip_tx_id:
+        q = q.filter(Tx.id != skip_tx_id)
+    totals = {kind: float(total or 0) for kind, total in q.group_by(Tx.kind)}
+    balance = (wallet.opening_balance or 0) + totals.get("income", 0.0) - totals.get("expense", 0.0)
+    if amount <= balance + 0.005:
+        return None
+    return (f"{wallet.name} only has ₱{max(balance, 0):,.2f}. Lower the amount, choose another wallet, "
+            f"or adjust the wallet's balance first.")
+
+
+def tx_row(r, members, wallet_names):
+    return {"id": r.id, "kind": r.kind, "amount": r.amount, "category": r.category,
+            "note": r.note, "date": r.date.isoformat(), "member": members.get(r.user_id, "Family member"),
+            "status": r.status, "has_receipt": bool(r.receipt_data),
+            "wallet_id": r.wallet_id if r.wallet_id in wallet_names else None, "wallet": wallet_names.get(r.wallet_id),
+            "mine": r.user_id == g.u.id, "can_edit": bool(g.u.is_owner or r.user_id == g.u.id)}
+
+
 @app.route("/api/transactions", methods=["GET", "POST"])
 @fam
 def txs():
@@ -1121,9 +1427,14 @@ def txs():
         kind = d["kind"]
         category = d.get("category") if isinstance(d.get("category"), str) else "Other"
         note = d.get("note") if isinstance(d.get("note"), str) else ""
+        wallet_id, problem = wallet_from(d, g.u.id)
+        if not problem and kind == "expense" and not needs_approval(kind):
+            problem = overdraft_error(wallet_id, amt)
+        if problem:
+            return err(problem)
         row = Tx(family_id=g.f.id, user_id=g.u.id, kind=kind, amount=amt,
                  category=(category or "Other")[:60], note=note[:200], date=tx_date,
-                 status="pending" if needs_approval(kind) else "approved")
+                 status="pending" if needs_approval(kind) else "approved", wallet_id=wallet_id)
         problem = apply_receipt(row, d)
         if problem:
             return err(problem)
@@ -1132,10 +1443,8 @@ def txs():
         return jsonify(ok=1, status=row.status)
     rows = Tx.query.filter_by(family_id=g.f.id).order_by(Tx.date.desc(), Tx.id.desc()).limit(100)
     members = {u.id: u.name for u in User.query.filter_by(family_id=g.f.id)}
-    return jsonify([{"id": r.id, "kind": r.kind, "amount": r.amount, "category": r.category,
-                     "note": r.note, "date": r.date.isoformat(), "member": members.get(r.user_id, "Family member"),
-                     "status": r.status, "has_receipt": bool(r.receipt_data),
-                     "can_edit": bool(g.u.is_owner or r.user_id == g.u.id)} for r in rows])
+    wallet_names = {w.id: w.name for w in Wallet.query.filter_by(user_id=g.u.id)}
+    return jsonify([tx_row(r, members, wallet_names) for r in rows])
 
 
 @app.route("/api/transactions/<int:i>", methods=["GET", "PUT", "DELETE"])
@@ -1168,7 +1477,18 @@ def tx_detail(i):
         category = d.get("category") if isinstance(d.get("category"), str) else "Other"
         note = d.get("note") if isinstance(d.get("note"), str) else ""
         row.kind, row.category, row.note = d["kind"], (category or "Other")[:60], note[:200]
+        if "wallet_id" in d:
+            wallet_id, problem = wallet_from(d, row.user_id)
+            if problem:
+                db.session.rollback()
+                return err(problem)
+            row.wallet_id = wallet_id
         row.status = "pending" if needs_approval(row.kind) else "approved"
+        if row.kind == "expense" and row.status == "approved":
+            problem = overdraft_error(row.wallet_id, row.amount, skip_tx_id=row.id)
+            if problem:
+                db.session.rollback()
+                return err(problem)
         problem = apply_receipt(row, d)
         if problem:
             db.session.rollback()
@@ -1181,7 +1501,8 @@ def tx_detail(i):
             return err("Could not save these changes. Please refresh and try again.", 500)
         return jsonify(ok=1, status=row.status)
     return jsonify(id=row.id, kind=row.kind, amount=row.amount, category=row.category,
-                   note=row.note, date=row.date.isoformat(), status=row.status, receipt_data=row.receipt_data)
+                   note=row.note, date=row.date.isoformat(), status=row.status, receipt_data=row.receipt_data,
+                   wallet_id=row.wallet_id if row.user_id == g.u.id else None, mine=row.user_id == g.u.id)
 
 
 @app.post("/api/transactions/<int:i>/<any(approve, reject):decision>")
@@ -1192,6 +1513,10 @@ def tx_decide(i, decision):
     row = Tx.query.filter_by(id=i, family_id=g.f.id, status="pending").first_or_404()
     if not g.u.is_owner and row.user_id == g.u.id:
         return err("You cannot approve your own expense", 403)
+    if decision == "approve" and row.kind == "expense":
+        problem = overdraft_error(row.wallet_id, row.amount, skip_tx_id=row.id)
+        if problem:
+            return err(problem, 409)
     row.status = "approved" if decision == "approve" else "rejected"
     db.session.commit()
     return jsonify(ok=1, status=row.status)
@@ -1234,8 +1559,11 @@ def dash():
     goals = Goal.query.filter_by(family_id=g.f.id).all()
     saved, target = sum(x.saved for x in goals), sum(x.target for x in goals)
     members = {u.id: u.name for u in User.query.filter_by(family_id=g.f.id)}
+    wallet_data = wallet_overview()
+    wallet_names = {w["id"]: w["name"] for w in wallet_data["wallets"]}
     recent = [{"kind": r.kind, "amount": r.amount, "category": r.category, "note": r.note,
-               "date": r.date.isoformat(), "member": members.get(r.user_id, "Family member")}
+               "date": r.date.isoformat(), "member": members.get(r.user_id, "Family member"),
+               "wallet": wallet_names.get(r.wallet_id)}
               for r in rows[:6]]
     bills = [{"id": b.id, "name": b.name, "amount": b.amount, "due": b.due.isoformat(),
               "overdue": b.due < t,
@@ -1255,6 +1583,8 @@ def dash():
                  for r in Tx.query.filter_by(family_id=g.f.id, status="pending").order_by(Tx.date.desc())] if can_manage_finances() else []
     totals.update(category_totals=categories, months=months, recent=recent, bills=bills,
                    budgets=budget_progress, approvals=approvals,
+                   wallets=wallet_data["wallets"][:3], wallet_count=len(wallet_data["wallets"]),
+                   wallet_totals=wallet_data["totals"],
                    savings={"saved": saved, "target": target,
                             "percent": min(100, round(saved * 100 / target)) if target else 0})
     return jsonify(totals)
@@ -1372,9 +1702,13 @@ def pay(i):
     b = Bill.query.filter_by(id=i, family_id=g.f.id).first_or_404()
     if b.paid:
         return err("This bill has already been paid", 409)
+    wallet_id, problem = wallet_from(body(), g.u.id)
+    problem = problem or overdraft_error(wallet_id, b.amount)
+    if problem:
+        return err(problem)
     b.paid = True
-    db.session.add(Tx(family_id=g.f.id, user_id=g.u.id, kind="expense", amount=b.amount,
-                      category="Bills", note=b.name, date=app_today()))
+    db.session.add(Tx(family_id=g.f.id, user_id=g.u.id, kind="expense", wallet_id=wallet_id,
+                      amount=b.amount, category="Bills", note=b.name, date=app_today()))
     db.session.commit()
     return jsonify(ok=1)
 
@@ -1396,20 +1730,71 @@ def goals():
         db.session.add(Goal(family_id=g.f.id, name=name.strip()[:120], target=tgt, saved=0))
         db.session.commit()
         return jsonify(ok=1)
-    return jsonify([{"id": x.id, "name": x.name, "target": x.target, "saved": x.saved}
-                    for x in Goal.query.filter_by(family_id=g.f.id)])
+    goals = Goal.query.filter_by(family_id=g.f.id).all()
+    counts = {goal.id: GoalContribution.query.filter_by(goal_id=goal.id).count() for goal in goals}
+    return jsonify([{"id": x.id, "name": x.name, "target": x.target, "saved": x.saved,
+                     "remaining": max(0, round(x.target - x.saved, 2)),
+                     "contributions": counts.get(x.id, 0)}
+                    for x in goals])
+
+
+@app.route("/api/goals/<int:i>", methods=["GET", "PUT", "DELETE"])
+@fam
+def goal_detail(i):
+    goal = Goal.query.filter_by(id=i, family_id=g.f.id).first_or_404()
+    if request.method != "GET" and not can_manage_finances():
+        return err("Only a Parent or the family owner can change savings goals", 403)
+    if request.method == "DELETE":
+        GoalContribution.query.filter_by(goal_id=goal.id, family_id=g.f.id).delete()
+        db.session.delete(goal)
+        db.session.commit()
+        return jsonify(ok=1)
+    if request.method == "PUT":
+        d = body()
+        name = d.get("name") if isinstance(d.get("name"), str) else ""
+        if not name.strip():
+            return err("Goal name required")
+        try:
+            target = num(d.get("target"))
+        except ValueError as e:
+            return err(str(e))
+        if target + 0.005 < goal.saved:
+            return err(f"The target can't be less than the ₱{goal.saved:,.2f} already saved")
+        goal.name, goal.target = name.strip()[:120], target
+        db.session.commit()
+        return jsonify(ok=1)
+    contributions = GoalContribution.query.filter_by(
+        goal_id=goal.id, family_id=g.f.id
+    ).order_by(GoalContribution.date.desc(), GoalContribution.id.desc()).limit(100).all()
+    return jsonify(id=goal.id, name=goal.name, target=goal.target, saved=goal.saved,
+                   remaining=max(0, round(goal.target - goal.saved, 2)),
+                   contributions=[{"id": c.id, "amount": c.amount, "note": c.note,
+                                   "date": c.date.isoformat(),
+                                   "member": c.member_name or "Family member"}
+                                  for c in contributions])
 
 
 @app.post("/api/goals/<int:i>/add")
 @fam
 def goal_add(i):
-    x = Goal.query.filter_by(id=i, family_id=g.f.id).first_or_404()
+    goal = Goal.query.filter_by(id=i, family_id=g.f.id).first_or_404()
+    d = body()
     try:
-        x.saved += num(body().get("amount"))
+        amount = num(d.get("amount"))
     except ValueError as e:
         return err(str(e))
+    remaining = max(0, round(goal.target - goal.saved, 2))
+    if remaining <= 0:
+        return err("This savings goal has already been reached", 409)
+    if amount > remaining + 0.005:
+        return err(f"You can add up to ₱{remaining:,.2f} to this goal", 409)
+    note = d.get("note") if isinstance(d.get("note"), str) else ""
+    contribution = GoalContribution(family_id=g.f.id, goal_id=goal.id, user_id=g.u.id,
+                                    member_name=g.u.name[:120], amount=amount, note=note[:200])
+    goal.saved = round(goal.saved + amount, 2)
+    db.session.add(contribution)
     db.session.commit()
-    return jsonify(ok=1)
+    return jsonify(ok=1, saved=goal.saved, remaining=max(0, round(goal.target - goal.saved, 2)))
 
 
 @app.route("/api/budgets", methods=["GET", "POST"])
@@ -1467,6 +1852,149 @@ def budget_detail(i):
     if other:
         return err("A budget already exists for that category")
     budget.category, budget.monthly_limit = category.strip(), monthly_limit
+    db.session.commit()
+    return jsonify(ok=1)
+
+
+# ---------- Bank wallets: Cash Wallet and Card Wallet (one set per user account) ----------
+
+def wallet_sums(since=None):
+    """{wallet_id: {"income": x, "expense": y}} for the signed-in account's approved, wallet-linked transactions."""
+    q = db.session.query(Tx.wallet_id, Tx.kind, db.func.sum(Tx.amount)).filter(
+        Tx.user_id == g.u.id, Tx.status == "approved", Tx.wallet_id.isnot(None))
+    if since:
+        q = q.filter(Tx.date >= since)
+    out = {}
+    for wid, kind, total in q.group_by(Tx.wallet_id, Tx.kind):
+        out.setdefault(wid, {"income": 0.0, "expense": 0.0})[kind] = float(total or 0)
+    return out
+
+
+def is_credit(w):
+    return w.kind == "card" and w.card_type == "credit"
+
+
+def wallet_json(w, sums, month_sums):
+    s, m = sums.get(w.id, {}), month_sums.get(w.id, {})
+    income, expense = s.get("income", 0.0), s.get("expense", 0.0)
+    balance = round((w.opening_balance or 0) + income - expense, 2)
+    out = {"id": w.id, "kind": w.kind, "name": w.name, "bank": w.bank, "card_type": w.card_type,
+           "last4": w.last4, "credit_limit": w.credit_limit, "balance": balance,
+           "income": income, "expense": expense,
+           "month_income": m.get("income", 0.0), "month_expense": m.get("expense", 0.0)}
+    if is_credit(w):
+        out["owed"] = round(max(0.0, -balance), 2)
+        out["available"] = round(max(0.0, w.credit_limit + balance), 2) if w.credit_limit else None
+    return out
+
+
+def wallet_overview():
+    """The signed-in account's wallets (cash first) with live balances, plus totals."""
+    sums, month_sums = wallet_sums(), wallet_sums(app_today().replace(day=1))
+    rows = sorted(Wallet.query.filter_by(user_id=g.u.id).all(), key=lambda w: (w.kind != "cash", w.id))
+    wallets = [wallet_json(w, sums, month_sums) for w in rows]
+    cash = sum(w["balance"] for w in wallets if w["kind"] == "cash")
+    debit = sum(w["balance"] for w in wallets if w["kind"] == "card" and w["card_type"] != "credit")
+    owed = sum(w["owed"] for w in wallets if w["card_type"] == "credit" and w["kind"] == "card")
+    return {"wallets": wallets, "totals": {"cash": round(cash, 2), "debit": round(debit, 2),
+                                           "available": round(cash + debit, 2), "owed": round(owed, 2)}}
+
+
+def parse_wallet(d, kind, with_balance=True):
+    """Validated wallet fields from a request body. Raises ValueError with a user-facing message."""
+    name = d.get("name") if isinstance(d.get("name"), str) else ""
+    name = name.strip()
+    if not name:
+        raise ValueError("Wallet name required")
+    if len(name) > 80:
+        raise ValueError("Wallet name must be 80 characters or fewer")
+    out = {"name": name}
+    raw = d.get("opening_balance")
+    amount = 0.0 if raw in (None, "") else num0(raw)
+    if kind == "cash":
+        out.update(bank=None, card_type=None, last4=None, credit_limit=None)
+        if with_balance:
+            out["opening_balance"] = amount
+        return out
+    bank = d.get("bank") if isinstance(d.get("bank"), str) else ""
+    out["bank"] = bank.strip()[:80] or None
+    card_type = d.get("card_type")
+    if card_type not in ("debit", "credit"):
+        raise ValueError("Choose debit or credit")
+    last4 = str(d.get("last4") if d.get("last4") is not None else "").strip()
+    if not re.fullmatch(r"\d{4}", last4):
+        raise ValueError("Enter only the last 4 digits of the card")
+    out.update(card_type=card_type, last4=last4)
+    limit = d.get("credit_limit")
+    out["credit_limit"] = num(limit) if card_type == "credit" and limit not in (None, "") else None
+    if with_balance:
+        out["opening_balance"] = -amount if card_type == "credit" else amount  # credit: stored as money owed
+    return out
+
+
+def own_wallet(i):
+    return Wallet.query.filter_by(id=i, user_id=g.u.id).first_or_404()
+
+
+@app.route("/api/wallets", methods=["GET", "POST"])
+@fam
+def wallets():
+    if request.method == "POST":
+        d = body()
+        kind = d.get("kind")
+        if kind not in ("cash", "card"):
+            return err("Choose a cash wallet or a card")
+        if Wallet.query.filter_by(user_id=g.u.id).count() >= MAX_WALLETS:
+            return err(f"An account can have up to {MAX_WALLETS} wallets")
+        try:
+            fields = parse_wallet(d, kind)
+        except ValueError as e:
+            return err(str(e))
+        wallet = Wallet(user_id=g.u.id, kind=kind, **fields)
+        db.session.add(wallet)
+        db.session.commit()
+        return jsonify(ok=1, id=wallet.id)
+    return jsonify(wallet_overview())
+
+
+@app.route("/api/wallets/<int:i>", methods=["GET", "PUT", "DELETE"])
+@fam
+def wallet_detail(i):
+    wallet = own_wallet(i)
+    if request.method == "DELETE":
+        # The transactions stay in the family's history; they just stop pointing at this wallet.
+        Tx.query.filter_by(user_id=g.u.id, wallet_id=wallet.id).update({"wallet_id": None})
+        db.session.delete(wallet)
+        db.session.commit()
+        return jsonify(ok=1)
+    if request.method == "PUT":
+        try:
+            fields = parse_wallet({**body(), "card_type": wallet.card_type}, wallet.kind, with_balance=False)
+        except ValueError as e:
+            return err(str(e))
+        for key, value in fields.items():
+            setattr(wallet, key, value)
+        db.session.commit()
+        return jsonify(ok=1)
+    out = wallet_json(wallet, wallet_sums(), wallet_sums(app_today().replace(day=1)))
+    members = {u.id: u.name for u in User.query.filter_by(family_id=g.f.id)}
+    rows = Tx.query.filter_by(user_id=g.u.id, wallet_id=wallet.id).order_by(Tx.date.desc(), Tx.id.desc()).limit(30)
+    out["transactions"] = [tx_row(r, members, {wallet.id: wallet.name}) for r in rows]
+    return jsonify(out)
+
+
+@app.post("/api/wallets/<int:i>/adjust")
+@fam
+def wallet_adjust(i):
+    """Correct a wallet to match reality: cash/debit balance, or the amount currently owed on a credit card."""
+    wallet = own_wallet(i)
+    try:
+        target = num0(body().get("amount"))
+    except ValueError as e:
+        return err(str(e))
+    s = wallet_sums().get(wallet.id, {})
+    flow = s.get("income", 0.0) - s.get("expense", 0.0)
+    wallet.opening_balance = round((-target if is_credit(wallet) else target) - flow, 2)
     db.session.commit()
     return jsonify(ok=1)
 

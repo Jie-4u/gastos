@@ -5,12 +5,15 @@
 1. Create and activate a Python virtual environment.
 2. Install dependencies with `pip install -r requirements.txt`.
 3. Copy `.env.example` to `.env`.
-4. Generate a unique `SECRET_KEY` (PowerShell: `python -c "import secrets; print(secrets.token_urlsafe(48))"`) and put it in `.env`.
-5. Keep `APP_BASE_URL=http://127.0.0.1:5000` for local-only use. For remote invitations, use the permanent HTTPS URL of the deployed app.
-6. Run `python app.py` and open `http://127.0.0.1:5000`.
-7. Run regression tests with `python -m unittest discover -s tests`.
+4. Set `APP_ENV=development` in `.env`. Startup now refuses to run without an explicit environment.
+5. Generate a unique `SECRET_KEY` (PowerShell: `python -c "import secrets; print(secrets.token_urlsafe(48))"`) and put it in `.env`. If you leave it blank in development, Gastos generates an ephemeral key and resets sessions on restart.
+6. Keep `APP_BASE_URL=http://127.0.0.1:5000` for local-only use. For remote invitations, use the permanent HTTPS URL of the deployed app.
+7. Run `python app.py` and open `http://127.0.0.1:5000`.
+8. Run regression tests with `python -m unittest discover -s tests`; the test process sets its own `APP_ENV=test`.
 
 The `.env` file is ignored by Git. Do not commit real keys or passwords. Existing local development databases are under `instance/` and are ignored.
+
+Startup fails closed: a missing or invalid `APP_ENV`, the old development placeholder key, a missing production `SECRET_KEY`, or unsafe production settings stop the process with a clear error. This is intentional. In development/test, a blank `SECRET_KEY` generates an ephemeral key instead. After changing `SECRET_KEY`, all existing sessions, invitation links, and password-reset links become invalid.
 
 ## Invitation email
 
@@ -35,7 +38,7 @@ The same SMTP sender is used for password-reset messages. Reset links are signed
 
 For local end-to-end testing, set `APP_BASE_URL=http://127.0.0.1:5000` and restart Gastos. Create an invitation for an inbox you can open on the **same computer**. Brevo can deliver the message, and the link opens your local app in that computer's browser. The link is not reachable from another person's device because `127.0.0.1` always means "this device." For another device or remote tester, use a running HTTPS tunnel or a staging deployment and set `APP_BASE_URL` to that reachable HTTPS address for the entire test. Restart Gastos after switching the URL and resend invitations created under the previous URL.
 
-Invitees who create an account from the invitation are added to the family as **Members** during signup and signed in automatically. If that browser is currently signed in as a different user (common when testing locally), the invitation screen asks the tester to sign in or create an account using the invited email before accepting. Members can view shared family dashboards, reports, transactions, bills, budgets, and goals; add and edit their own transactions; and contribute to savings goals. Only the owner can change other members' transactions, manage bills/budgets/goals, invite/remove members, or manage the subscription. These rules are enforced by the API as well as reflected in the interface.
+Invitees who create an account from the invitation are added to the family as **Members** during signup and signed in automatically. If that browser is currently signed in as a different user (common when testing locally), the invitation screen asks the tester to sign in or create an account using the invited email before accepting. Members can view shared family dashboards, reports, transactions, bills, budgets, goals, and wallets; add and edit their own transactions; and contribute to savings goals. Parents and the owner can manage bills, budgets, goals, wallets, and expense approvals. Only the owner can change other members' transactions, invite/remove members, change roles, or manage the subscription. These rules are enforced by the API as well as reflected in the interface.
 
 The app generates links at `APP_BASE_URL/?invite=...`. Localhost links only work on the computer running Gastos. For a temporary remote demo, ngrok can expose port 5000, but its agent must stay online and its address can change. A link to an offline ngrok endpoint cannot be repaired by Brevo; the invitation has to be resent after the permanent address is available. For real users, deploy Gastos and use a stable HTTPS hosting URL or a custom domain. Gastos and its API are served from the same origin, so that single URL serves both.
 
@@ -58,14 +61,31 @@ Other suitable options are Railway, Fly.io, or a VPS. Each needs a persistent Po
 
 ## Production settings
 
-- Set `SECRET_KEY` to a unique random secret and keep it in the host's secret manager.
-- Set `APP_ENV=production`; startup refuses to use the development fallback key in this mode.
+- Set `APP_ENV=production`; startup now requires an explicit `development`, `test`, or `production` value. Existing deployments that relied on the old development fallback will fail to start until this and the settings below are configured.
+- Set `SECRET_KEY` to a unique random secret of at least 32 characters and keep it in the host's secret manager. The old development placeholder is rejected in every environment.
 - Set `APP_BASE_URL` to a custom canonical HTTPS origin if you use a domain; otherwise Render's HTTPS URL is used. Production startup rejects a missing/non-HTTPS URL, URL path, or SQLite database. Invitation links are not built from request headers.
-- Set `DATABASE_URL` to the production PostgreSQL connection string. Back up existing data before deployment. The web service's health check at `/health` checks database connectivity.
+- Set `DATABASE_URL` to the production PostgreSQL connection string; production startup requires it. Back up existing data before deployment. The web service's health check at `/health` checks database connectivity.
 - Configure SMTP values if invitations should be delivered by email.
+- The included Procfile sets `APP_ENV=production`; hosts using it must also provide `SECRET_KEY` and `DATABASE_URL` or the process will refuse to start.
 - Serve the app behind HTTPS and use a production WSGI server. Direct `python app.py` startup enables debug mode only when `FLASK_DEBUG=1`.
 
 The repository currently applies additive schema changes at app startup. The included Gunicorn command uses one worker because startup schema changes are not safe to race across multiple worker processes. Before scaling to multiple instances or running broader production workloads, replace startup DDL with versioned migrations run once before workers start.
+
+## Wallets and transfers
+
+Every family gets a starter **Family cash** wallet. Parents and the owner can add family-shared wallets for cash, banks, or e-wallets such as GCash, set an opening balance, and edit or delete unused wallets. Every transaction is assigned to one wallet, so each wallet balance is calculated from its opening balance plus approved income and minus approved expenses. Household transfers move money between wallets without changing the family's total balance; use the transfer button on a wallet row to start with that wallet already selected as the source.
+
+Wallets are shared with the whole family in this version; there are no private per-member wallets. Existing transactions are assigned to the starter wallet during startup when the database is upgraded.
+
+## Savings contributions
+
+Parents and the owner create savings goals; any family member can add a manual contribution. Each contribution records the contributor, date, amount, and optional note, and the goal detail view shows the contribution history. Contributions stop at the target amount; a completed goal cannot receive more savings. Transactions do not automatically become savings contributions in this version.
+
+## Request limits
+
+Sign-in, signup, password-reset requests, invitation sends, and outbound email are rate limited. Counters are stored in the database and keyed by hashed IP, account, or email values, so they survive application restarts. Sign-in and password reset enforce both per-IP and per-account limits; invitations enforce per-owner and per-recipient limits; outbound email has global and per-recipient limits. Password-reset responses stay generic when a limit is reached.
+
+Set `TRUST_PROXY_HEADERS=1` only when the app is behind a trusted proxy that sets `X-Forwarded-For` (the Render Blueprint and Procfile do this). Do not enable it on a directly exposed server, because clients could spoof the header and bypass IP limits.
 
 ## Premium payments: account setup still required
 

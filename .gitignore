@@ -8,3 +8,4 @@ instance/
 gastos.db
 .vercel
 .env*
+docs/FINDINGS.md
