@@ -146,7 +146,7 @@ const catBreakdown = (totals, total) => {
 const V = {};
 const auth = (title, sub, body) => ({ bare: 1, title, html: `<section class="auth"><div class="auth-top"><button class="link" data-back>Back</button>${logo}</div><h1>${title}</h1><p class="mu">${sub}</p>${body}</section>` });
 
-V.welcome = async () => ({ bare: 1, html: `<section class="welcome"><div class="welcome-shell"><header class="welcome-head">${logo}<nav class="welcome-nav" aria-label="Main navigation"><a href="#features">Features</a><a href="#how-it-works">How it works</a></nav><button class="welcome-nav-cta" data-go="signin">Sign in <span aria-hidden="true">→</span></button></header>
+V.welcome = async () => ({ bare: 1, html: `<section class="welcome"><div class="welcome-shell"><header class="welcome-head">${logo}<nav class="welcome-nav" aria-label="Main navigation"><button type="button" data-scroll="features">Features</button><button type="button" data-scroll="how-it-works">How it works</button></nav><button class="welcome-nav-cta" data-go="signin">Sign in <span aria-hidden="true">→</span></button></header>
   <div class="welcome-grid"><div class="intro"><span class="eyebrow"><i></i> MADE FOR FILIPINO FAMILIES</span>
   <h1>Make room for<br><em>what matters.</em></h1>
   <p class="lead">A calmer way to handle family money. Keep track of spending, stay ahead of bills, and build savings together.</p>
@@ -544,6 +544,11 @@ const A = {
 
 /* ---------- Event wiring ---------- */
 document.addEventListener('click', async e => {
+  const scrollLink = e.target.closest('[data-scroll]');
+  if (scrollLink) {
+    document.getElementById(scrollLink.dataset.scroll)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return;
+  }
   const el = e.target.closest('[data-go],[data-back],[data-act],[data-tab],[data-filter]'); if (!el) return;
   try {
     if (el.dataset.k) S.k = el.dataset.k;
