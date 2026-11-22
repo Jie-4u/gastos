@@ -82,7 +82,7 @@ const wRow = w => `<button class="item" data-go="wallet" data-wid="${w.id}"><spa
 const walletChips = (ws, sel) => ws.length ? `<fieldset class="field"><legend>Wallet</legend><div class="chips"><label class="chip"><input type="radio" name="wallet_id" value="" ${sel ? '' : 'checked'}>No wallet</label>${ws.map(w => `<label class="chip"><input type="radio" name="wallet_id" value="${w.id}" ${String(sel) === String(w.id) ? 'checked' : ''}>${wIco(w)} ${esc(w.name)}${w.kind === 'card' ? ` ••${esc(w.last4)}` : ''}</label>`).join('')}</div></fieldset>` : '';
 
 /* ---------- Small components ---------- */
-const logo = '<span class="wordmark">Gastos</span>';
+const logo = '<span class="wordmark"><img src="/logo.svg" alt="" width="38" height="38">Gastos</span>';
 const bar = (p, cls = '', color = '') => `<span class="bar ${cls}"><i style="width:${Math.min(100, Math.max(0, p))}%;${color ? `background:${color}` : ''}"></i></span>`;
 const empty = (art, title, text, cta = '') => `<div class="empty"><div class="art">${art}</div><b>${title}</b><p>${text}</p>${cta}</div>`;
 const cardH = (title, more = '') => `<div class="card-h"><h3>${title}</h3>${more}</div>`;
@@ -146,12 +146,28 @@ const catBreakdown = (totals, total) => {
 const V = {};
 const auth = (title, sub, body) => ({ bare: 1, title, html: `<section class="auth"><div class="auth-top"><button class="link" data-back>Back</button>${logo}</div><h1>${title}</h1><p class="mu">${sub}</p>${body}</section>` });
 
-V.welcome = async () => ({ bare: 1, html: `<section class="welcome"><div class="intro">${logo}
-  <h1>Every peso,<br><em>together.</em></h1>
-  <p class="lead">Gastos is the shared money app for Filipino families: track spending, stay ahead of bills, and save for what matters in one place.</p>
-  <ul class="perks"><li>See where the household budget goes</li><li>Know which bills are due before they're late</li><li>Save toward goals as a family</li></ul>
-  <div class="stack"><button class="btn lg" data-go="signup">Create a free account</button><button class="btn ghost lg" data-go="signin">Sign in</button></div>
-  <p class="note">Free for up to 4 family members.</p></div></section>` });
+V.welcome = async () => ({ bare: 1, html: `<section class="welcome"><div class="welcome-shell"><header class="welcome-head">${logo}<nav class="welcome-nav" aria-label="Main navigation"><a href="#features">Features</a><a href="#how-it-works">How it works</a></nav><button class="welcome-nav-cta" data-go="signin">Sign in <span aria-hidden="true">→</span></button></header>
+  <div class="welcome-grid"><div class="intro"><span class="eyebrow"><i></i> MADE FOR FILIPINO FAMILIES</span>
+  <h1>Make room for<br><em>what matters.</em></h1>
+  <p class="lead">A calmer way to handle family money. Keep track of spending, stay ahead of bills, and build savings together.</p>
+  <div class="welcome-actions"><button class="btn lg" data-go="signup">Get started for free <span aria-hidden="true">→</span></button><button class="btn ghost lg" data-go="signin">I already have an account</button></div>
+  <p class="welcome-proof"><span>✓</span> Free to start <span>·</span> Up to 4 family members <span>·</span> Your wallet stays yours</p></div>
+  <div class="welcome-art" aria-label="Gastos wallet and family spending preview"><div class="art-glow"></div><div class="art-spark spark-one">✦</div><div class="art-spark spark-two">✳</div>
+    <div class="preview-card"><div class="preview-top"><span class="preview-mark">${logo}</span><span class="preview-dots">•••</span></div><small class="preview-label">FAMILY BALANCE</small><strong class="preview-balance">₱24,680<span>.50</span></strong><div class="preview-change"><span>↗</span> Your month, in view</div><div class="preview-rule"></div>
+      <div class="preview-row"><span class="preview-icon mint">↗</span><span><b>Money in</b><small>Payday · Today</small></span><strong class="positive">+₱18,500</strong></div>
+      <div class="preview-row"><span class="preview-icon peach">↘</span><span><b>Groceries</b><small>Logged by Alex · Yesterday</small></span><strong>−₱2,340</strong></div>
+      <div class="preview-goal"><span class="goal-icon">⌂</span><span><small>FAMILY GOAL</small><b>Emergency fund</b></span><span class="goal-percent">68%</span><i><u></u></i></div>
+    </div><div class="float-note"><span class="float-check">✓</span><span><b>Bill reminder</b><small>Electricity · Due in 2 days</small></span></div>
+    <div class="art-caption"><span class="avatar-pile"><i>A</i><i>M</i><i>J</i></span><span>One family. A clearer picture.</span></div>
+  </div></div><footer class="welcome-foot"><span>Simple money habits, built together.</span><span>Gastos <b>•</b> Your family’s money companion</span></footer></div>
+  <div class="site-sections"><section class="site-features" id="features"><div class="section-heading"><span class="eyebrow"><i></i> LESS MONEY STRESS</span><h2>One family view.<br><em>More peace of mind.</em></h2><p>Small money moments are easier when everyone has a clear place to start.</p></div>
+    <div class="feature-grid"><article class="feature-card"><span class="feature-icon green">↗</span><h3>Know where it goes</h3><p>Log income and expenses as they happen. See this month’s flow and recent activity without digging through chats.</p></article>
+      <article class="feature-card"><span class="feature-icon gold">◷</span><h3>Stay ahead of bills</h3><p>Keep due dates in one shared view and mark bills paid when they’re handled. Fewer last-minute surprises.</p></article>
+      <article class="feature-card"><span class="feature-icon lilac">✳</span><h3>Save with a reason</h3><p>Give a family goal a name, set a target, and watch contributions bring it closer—one step at a time.</p></article></div>
+    </section><section class="site-how" id="how-it-works"><div class="how-copy"><span class="eyebrow"><i></i> EASY TO GET GOING</span><h2>Start simple.<br><em>Build together.</em></h2><p>No complicated setup. Create your space and add the pieces that matter to your family.</p><button class="btn" data-go="signup">Create your free account <span aria-hidden="true">→</span></button></div>
+      <ol class="how-steps"><li><span>01</span><div><b>Create your family space</b><p>Choose a family name and invite the people you want to plan with.</p></div></li><li><span>02</span><div><b>Add your own wallets</b><p>Track cash or cards privately, with balances that update as you log transactions.</p></div></li><li><span>03</span><div><b>Make a plan that sticks</b><p>Keep bills, budgets, and savings goals together in one calm overview.</p></div></li></ol>
+    </section><section class="site-cta"><div><span class="eyebrow">A BETTER MONEY ROUTINE STARTS HERE</span><h2>Make the next peso count.</h2><p>Bring your family’s money picture into focus, one small step at a time.</p></div><button class="btn lg" data-go="signup">Get started for free <span aria-hidden="true">→</span></button></section>
+    <footer class="site-footer">${logo}<span>Made for families, with care. <b>© Gastos</b></span></footer></div></section>` });
 
 V.signup = async () => {
   const inv = S.inviteInfo;
@@ -349,12 +365,12 @@ const advanced = (a, now) => {
 const menu = (go, icon, title, sub = '') => `<button class="item" data-go="${go}"><span class="ico">${icon}</span><span class="grow"><b>${title}</b>${sub ? `<small>${sub}</small>` : ''}</span>${I.next}</button>`;
 V.profile = async () => {
   const f = S.me.family;
-  return { title: 'Profile', back: 1, narrow: 1, html: `<div class="card profile-head"><label class="avatar-edit" title="Change photo">${av(S.me.name, S.avatar, 'lg')}<span class="cam">${I.camera}</span><input type="file" accept="image/jpeg,image/png,image/webp" class="vh" data-avatar aria-label="Change profile photo"></label><span class="grow"><b style="font-size:18px">${esc(S.me.name)}</b><small>${esc(S.me.email)}</small>${f ? `<small>${esc(f.name)} · ${f.owner ? 'Owner' : esc(f.role)}</small>` : ''}${S.avatar ? '<button class="link" style="align-self:flex-start;margin-top:4px" data-act="rmavatar">Remove photo</button>' : ''}</span></div>
+  return { title: 'Profile', back: 1, html: `<div class="profile-layout"><div class="profile-main"><div class="card profile-head"><label class="avatar-edit" title="Change photo">${av(S.me.name, S.avatar, 'lg')}<span class="cam">${I.camera}</span><input type="file" accept="image/jpeg,image/png,image/webp" class="vh" data-avatar aria-label="Change profile photo"></label><span class="grow"><b style="font-size:18px">${esc(S.me.name)}</b><small>${esc(S.me.email)}</small>${f ? `<small>${esc(f.name)} · ${f.owner ? 'Owner' : esc(f.role)}</small>` : ''}${S.avatar ? '<button class="link" style="align-self:flex-start;margin-top:4px" data-act="rmavatar">Remove photo</button>' : ''}</span></div>
   <form data-f="profile" class="card stack"><h3>Personal details</h3>${field('Full name', `<input name="name" maxlength="120" value="${esc(S.me.name)}" required>`)}${field('Email', `<input name="email" type="email" value="${esc(S.me.email)}" required>`, 'Changing your email requires your current password below.')}
   <details class="pwbox"><summary>Password &amp; security</summary><div class="stack">${field('Current password', pw('current_password', 'Your current password', 'autocomplete="current-password"'))}${field('New password', pw('new_password', 'Leave blank to keep it', 'minlength="8" autocomplete="new-password"'))}</div></details>
-  <button class="btn">Save changes</button></form>
-  <div class="card list">${f ? menu('premium', I.crown, 'Gastos Premium', f.plan === 'premium' ? 'Your family is on Premium' : `Free plan · up to ${f.limit} members`) : ''}${menu('wallets', I.wallet, 'Wallets', 'Cash & cards')}${menu('reports', I.chart, 'Reports & export')}${menu('partners', I.brief, 'Partner services')}</div>
-  <button class="btn ghost" data-act="signout">${I.logout}Sign out</button>` };
+  <button class="btn">Save changes</button></form></div>
+  <aside class="profile-side"><div class="card list">${f ? menu('premium', I.crown, 'Gastos Premium', f.plan === 'premium' ? 'Your family is on Premium' : `Free plan · up to ${f.limit} members`) : ''}${menu('wallets', I.wallet, 'Wallets', 'Cash & cards')}${menu('reports', I.chart, 'Reports & export')}${menu('partners', I.brief, 'Partner services')}</div>
+  <button class="btn ghost" data-act="signout">${I.logout}Sign out</button></aside></div>` };
 };
 
 const FEATS = ['Up to 10 family members', 'Unlimited budgets', 'Expense approval: you approve members\' expenses', 'Bill reminders on your Home screen', 'Advanced analytics in Reports', 'Receipt scanning that reads the total', 'CSV export of all transactions'];
